@@ -1463,28 +1463,23 @@ mod tests {
   }
 
   #[test]
-  fn lemonade_model_shows_only_ctx_and_extras() {
+  fn llamacpp_model_shows_full_knob_set_plus_extras() {
     let mut s = LaunchPickerState::for_model("Qwen2.5-7B");
-    s.model_backend = BackendChoice::Explicit("lemonade".into());
-    // Lemonade honors `ctx` (lemond's `ctx_size` load option) and the
-    // free-form extras (`*_args`) — every other llama.cpp knob row is
-    // hidden outright. There is no Backend row: a model lives in exactly
-    // one backend's catalog, so there is nothing to choose.
+    s.model_backend = BackendChoice::Explicit("llamacpp".into());
     let visible: Vec<PickerField> = PickerField::all()
       .iter()
       .copied()
       .filter(|f| s.field_visible(*f))
       .collect();
-    assert_eq!(
-      visible,
-      vec![
-        PickerField::Preset,
-        PickerField::Knob(KnobField::Ctx),
-        PickerField::Extras
-      ],
-      "lemonade picker is preset + ctx + extras, nothing else"
+    assert!(
+      visible.contains(&PickerField::Knob(KnobField::Ctx)),
+      "llamacpp picker must show ctx"
     );
-    assert_eq!(s.active_backend_id(), "lemonade");
+    assert!(
+      visible.contains(&PickerField::Extras),
+      "llamacpp picker must show extras"
+    );
+    assert_eq!(s.active_backend_id(), "llamacpp");
   }
 
   #[test]
@@ -1895,26 +1890,33 @@ mod tests {
   }
 
   #[test]
-  fn selected_server_backend_swaps_the_knob_set() {
-    // A deepseek4-style model with a ds4 server and a llamacpp server.
-    let mut s = LaunchPickerState::for_model("DeepSeek-V4-Flash");
-    s.model_backend = BackendChoice::Explicit("ds4".into());
+  fn selected_server_stays_on_llamacpp_knob_set() {
+    // A llama.cpp model with two llama.cpp servers (different GPU builds).
+    // Selecting either server keeps the same llama.cpp knob set.
+    let mut s = LaunchPickerState::for_model("Llama-3.1-8B");
+    s.model_backend = BackendChoice::Explicit("llamacpp".into());
     s.servers = vec![
-      server("ds4", "ds4", "/ds4/ds4-server", vec![]),
       server(
         "llamacpp-rocm",
         "llamacpp",
         "/rocm/llama-server",
         vec![device("ROCm0", "ROCm", "card")],
       ),
+      server(
+        "llamacpp-vulkan",
+        "llamacpp",
+        "/vulkan/llama-server",
+        vec![device("Vulkan0", "Vulkan", "card")],
+      ),
     ];
     s.field = PickerField::Server;
-    // Unset → the model's own backend (ds4) with its six native knobs.
+    // Default → llamacpp with no native knobs (empty native_descriptors).
     s.seed_native_descriptors();
-    assert_eq!(s.active_backend_id(), "ds4");
-    assert_eq!(s.native_descriptors.len(), 6);
-    // Pick the llamacpp server → knob set swaps to llama.cpp (no native rows).
-    s.selected_server = Some("llamacpp-rocm".into());
+    assert_eq!(s.active_backend_id(), "llamacpp");
+    assert!(s.native_descriptors.is_empty());
+    assert!(s.knob_supported(KnobField::NGpuLayers));
+    // Pick the other llamacpp server → same llama.cpp behavior.
+    s.selected_server = Some("llamacpp-vulkan".into());
     s.seed_native_descriptors();
     assert_eq!(s.active_backend_id(), "llamacpp");
     assert!(s.native_descriptors.is_empty());
@@ -2225,15 +2227,12 @@ mod tests {
   }
 
   #[test]
-  fn seed_native_descriptors_empty_for_llamacpp_lemonade_six_for_ds4() {
-    // llama.cpp / Lemonade declare no native knobs, so the picker stays
-    // byte-identical for them; ds4 declares six. (A future backend with knobs
-    // must extend the exhaustive `resolved_backend` match — a compile error
-    // until it does.)
+  fn seed_native_descriptors_empty_for_llamacpp() {
+    // llama.cpp declares no native knobs, so the picker seed leaves the
+    // native_descriptors empty.
     for choice in [
       BackendChoice::Auto,
       BackendChoice::Explicit("llamacpp".into()),
-      BackendChoice::Explicit("lemonade".into()),
     ] {
       let mut s = LaunchPickerState::for_model("m");
       s.model_backend = choice.clone();
@@ -2243,14 +2242,6 @@ mod tests {
         "{choice:?} must surface no native knobs"
       );
     }
-    let mut s = LaunchPickerState::for_model("m");
-    s.model_backend = BackendChoice::Explicit("ds4".into());
-    s.seed_native_descriptors();
-    assert_eq!(
-      s.native_descriptors.len(),
-      6,
-      "ds4 must surface its six native knobs"
-    );
   }
 
   #[test]

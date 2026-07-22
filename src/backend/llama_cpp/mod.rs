@@ -622,7 +622,6 @@ mod tests {
         fit_ctx_floor,
         ..Default::default()
       },
-      ..Default::default()
     };
     MethodContext::new(ShutdownToken::new())
       .with_backend(backend, std::collections::BTreeMap::new())

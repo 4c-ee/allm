@@ -640,7 +640,7 @@ mod tests {
 
   #[test]
   fn resolve_layered_first_some_wins_per_field() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let upper = TypedKnobs {
       threads: Some(KnobValue::Set(8)),
       ..TypedKnobs::default()
@@ -691,7 +691,7 @@ mod tests {
 
   #[test]
   fn seed_layerless_auto_seeds_unfilled_and_preserves_layer_values() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     // user pinned `threads`, arch filled `n_gpu_layers`; `keep` is
     // layer-less.
     let user = TypedKnobs {
@@ -719,7 +719,7 @@ mod tests {
 
   #[test]
   fn seed_layerless_inherited_leaves_unfilled_unset() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let empty = TypedKnobs::default();
     let mut r = resolve_layered(&[(LayerLabel::User, &empty)]);
     // Matrix row "touches nothing, no layer, mode = inherited":
@@ -735,7 +735,7 @@ mod tests {
 
   #[test]
   fn seed_layerless_preserves_user_cycled_auto() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     // Matrix row "cycles to Auto": the user's explicit Auto is a real
     // layer value, kept distinct from a seeded Auto by its source chip.
     let user = TypedKnobs {
@@ -754,7 +754,7 @@ mod tests {
 
   #[test]
   fn resolve_layered_walks_full_precedence_chain() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     // preset > last_used > yaml-arch > built-in. Same field
     // contributed by every layer — the highest precedence wins.
     let preset = TypedKnobs {
@@ -785,7 +785,7 @@ mod tests {
 
   #[test]
   fn resolve_layered_preset_default_wins_over_last_used_but_last_fills_gaps() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     // The default-preset layer outranks last_params for a field it sets,
     // while last_params still fills a field the default-preset leaves unset.
     let default_preset = TypedKnobs {
@@ -824,7 +824,7 @@ mod tests {
 
   #[test]
   fn resolve_layered_yaml_and_builtin_both_report_arch_default() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     // Yaml and the compiled-in arch table share the `ArchDefault`
     // chip — only their per-field precedence differs.
     let yaml = TypedKnobs {
@@ -972,7 +972,7 @@ mod tests {
     // `cli::test_lock` so the sibling `resolve_layered_*` tests (which
     // also grab the lock) can't observe our temporary "1" and collapse
     // to user-only layers mid-assertion.
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let saved = std::env::var_os("LLAMASTASH_BENCH_DISABLE_DEFAULTS");
     let restore = || match &saved {
       Some(v) => std::env::set_var("LLAMASTASH_BENCH_DISABLE_DEFAULTS", v),

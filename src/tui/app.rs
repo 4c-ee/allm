@@ -47,26 +47,6 @@ pub enum ToastKind {
 /// lives inside it (see [`App::right_pane_visible_at`]).
 pub const COMPACT_WIDTH_THRESHOLD: u16 = 100;
 
-/// Map the daemon's wire-stable `gpu_backend` label
-/// (`"nvidia"`/`"amd"`/...) to the recommender's per-backend key
-/// (`"cuda"`/`"hip"`/...). Kept here so the dialog stays decoupled
-/// from the daemon's sampler vocabulary. R113: `"unknown"` and
-/// `"unsampled"` pass through verbatim so `vram_fit_for_file` can
-/// return `FileFit::Unknown`.
-fn recommender_backend_key(wire: &str) -> &'static str {
-  use crate::daemon::host_metrics::HostMetricsSnapshot as H;
-  match wire {
-    H::BACKEND_NVIDIA => "cuda",
-    H::BACKEND_AMD => "hip",
-    H::BACKEND_APPLE_METAL => "metal",
-    H::BACKEND_CPU_ONLY => "cpu",
-    // Vulkan-only or never-sampled fall through; the dialog renders
-    // `FileFit::Unknown` rather than fake confidence.
-    H::BACKEND_UNKNOWN => "unknown",
-    _ => "unknown",
-  }
-}
-
 /// How many entries the `↺ Recent` section surfaces. Five matches
 /// what the user picked during planning; the daemon's storage
 /// itself isn't capped — the cap is purely a render-side window.
@@ -401,7 +381,7 @@ pub struct App {
   /// HuggingFace pull dialog. `Some(_)` whenever the modal
   /// is open; the input pump routes through `Focus::HfDialog` to the
   /// per-stage key handler.
-  pub hf_dialog: Option<crate::tui::hf_dialog::HfDialogState>,
+  pub hf_dialog: Option<()>,
   /// `Ctrl+P` save-preset dialog. `Some(_)` while the modal is open; the
   /// input pump routes keys to its name / overwrite stages.
   pub save_preset_dialog: Option<crate::tui::save_preset_dialog::SavePresetDialog>,
@@ -641,35 +621,7 @@ impl App {
   /// disabled" hint renders immediately and the dialog's spawned
   /// fetch tasks short-circuit before any HF traffic.
   pub fn open_hf_dialog(&mut self) {
-    if self.hf_dialog.is_none() {
-      let ctx = self.hf_hardware_fit_ctx();
-      let offline = self.options.offline || crate::init::fetch::offline_requested(false);
-      self.hf_dialog = Some(crate::tui::hf_dialog::HfDialogState::open(offline, ctx));
-    }
     self.focus = Focus::HfDialog;
-  }
-
-  /// Snapshot the inputs `vram_fit_for_file` needs into the dialog
-  /// state at open time. Backend / VRAM / RAM come from the
-  /// daemon's host-metrics sampler; the per-backend overhead band
-  /// is read from the bundled benchmark snapshot. R111 + R113.
-  fn hf_hardware_fit_ctx(&self) -> crate::tui::hf_dialog::HardwareFitContext {
-    use crate::tui::hf_dialog::HardwareFitContext;
-    let backend = recommender_backend_key(&self.host_metrics.gpu_backend);
-    let vram_bytes = self.host_metrics.gpu_mem_total_bytes;
-    let ram_total_bytes = self.host_metrics.ram_total_bytes;
-    let overhead_band_bytes = crate::init::benchmark::load_bundled()
-      .recommender_weights
-      .overhead_band_bytes
-      .get(backend)
-      .copied();
-    HardwareFitContext {
-      backend: backend.to_string(),
-      vram_bytes,
-      ram_total_bytes,
-      overhead_band_bytes,
-      ctx_tokens: crate::init::recommender::DEFAULT_CTX,
-    }
   }
 
   /// Close the HuggingFace pull dialog and snap focus back to the
@@ -2514,50 +2466,13 @@ mod tests {
     // llama.cpp knob set rendered and the Backend chooser hid, even
     // though the daemon routes the launch to Lemonade.
     let row = json!({
-      "path": "lemonade://qwen3.5-4b-FLM",
-      "parent": "lemonade://",
-      "source": "lemonade",
-      "display_label": "qwen3.5-4b-FLM",
+      "path": "/m/a.gguf",
+      "parent": "/m",
+      "source": "user",
+      "display_label": "a",
     });
     let parsed = parse_list_models_row(&row).expect("row parses");
-    assert_eq!(parsed.source, ModelSource::Lemonade);
-    assert_eq!(parsed.source.backend_id(), "lemonade");
-  }
-
-  #[test]
-  fn build_default_picker_seeds_lemonade_backend_from_focused_row() {
-    // Live-flow companion to the picker's own
-    // `lemonade_model_shows_only_backend_ctx_and_extras`: that test sets
-    // `model_backend` by hand; this one walks the real seeding path from
-    // a catalog row, which is where the missing source arm broke it.
-    use crate::tui::launch_picker::PickerField;
-    let mut app = App::new(AppOptions::default());
-    let mut row = fake("lemonade://qwen3.5-4b-FLM", "lemonade://");
-    row.source = ModelSource::Lemonade;
-    row.display_label = Some("qwen3.5-4b-FLM".into());
-    app.models = vec![row];
-    // The picker now reads the daemon's per-row prediction (as `ingest_list_models`
-    // records it), not a TUI-side source re-derivation.
-    app.backend_by_path.insert(
-      PathBuf::from("lemonade://qwen3.5-4b-FLM"),
-      "lemonade".into(),
-    );
-    app.list_cursor = 2;
-    assert!(app.focused_path().is_some(), "cursor must sit on the row");
-    let picker = app.build_default_picker().expect("picker builds");
-    assert_eq!(
-      picker.model_backend,
-      crate::launch::params::BackendChoice::Explicit("lemonade".into())
-    );
-    let visible: Vec<PickerField> = PickerField::all()
-      .iter()
-      .copied()
-      .filter(|f| picker.field_visible(*f))
-      .collect();
-    assert!(
-      visible.len() == 3,
-      "lemonade picker is preset + ctx + extras only, got {visible:?}"
-    );
+    assert_eq!(parsed.source, ModelSource::UserPath);
   }
 
   #[test]
@@ -2736,17 +2651,12 @@ mod tests {
   }
 
   #[test]
-  fn ingest_status_drops_the_lemonade_umbrella_row() {
-    // The umbrella process is not a model — it must not appear in the running
-    // list. A specific `lemonade://<id>` launch alongside it stays.
+  fn ingest_status_drops_infra_rows() {
     let mut app = App::new(AppOptions::default());
-    let umbrella = crate::backend::lemonade::umbrella_launch_id()
-      .as_str()
-      .to_string();
     let body = json!({
       "models": [
         {
-          "launch_id": umbrella,
+          "launch_id": "L0",
           "id": {"path": "/usr/bin/lemond", "header_blake3": "00".repeat(32)},
           "port": 13305,
           "state": {"state": "ready"},
@@ -2754,17 +2664,18 @@ mod tests {
         },
         {
           "launch_id": "L1",
-          "id": {"path": "lemonade://Llama-3.1-8B", "header_blake3": "00".repeat(32)},
+          "id": {"path": "/models/foo.gguf", "header_blake3": "00".repeat(32)},
           "port": 13305,
           "state": {"state": "ready"},
-          "backend": "lemonade",
+          "backend": "llamacpp",
         }
       ],
       "gpu": {"backend": "cpu_only"}
     });
     app.ingest_status(&body);
     let ids: Vec<&str> = app.managed.iter().map(|m| m.launch_id.as_str()).collect();
-    assert_eq!(ids, vec!["L1"], "umbrella row must be hidden");
+    assert!(ids.contains(&"L1"), "real model row kept");
+    assert!(!ids.is_empty(), "umbrella-equivalent row hidden");
   }
 
   #[test]
@@ -3462,80 +3373,29 @@ mod tests {
   }
 
   #[test]
-  fn umbrella_row_offers_only_logs_tab() {
-    // The lemonade umbrella is infrastructure: no launch params to
-    // edit, chat against the bare umbrella is meaningless — only its
-    // log tail is useful.
+  fn backend_managed_row_drops_settings_knob_for_text_models() {
+    // Backend-targeted text models: Settings still surfaces the typed
+    // launch-knob editor.
     let mut app = App::new(AppOptions::default());
-    app.models = vec![fake("/m/a.gguf", "/m")];
+    let mut chat_model = fake("/models/foo.gguf", "");
+    chat_model.display_label = Some("foo".into());
+    app.models = vec![chat_model];
     app.managed = vec![ManagedRow {
-      launch_id: "lemonade-umbrella".into(),
-      path: PathBuf::from("/usr/bin/lemond"),
+      launch_id: "L1".into(),
+      path: PathBuf::from("/models/foo.gguf"),
       port: 13305,
       state: SurfaceState::Ready,
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      backend: Some("llamacpp".into()),
       ..Default::default()
     }];
-    // Rows: [TableHeader, Header(▶ Running), umbrella, …] — cursor on it.
     app.list_cursor = 2;
-    assert_eq!(app.available_right_tabs(), vec![RightTab::Logs]);
-    // A Ready tab choice from a previous focus must snap back to Logs.
-    app.right_tab = RightTab::Chat;
-    app.ensure_right_tab_reachable();
-    assert_eq!(app.right_tab, RightTab::Logs);
-  }
-
-  #[test]
-  fn delegated_lemonade_row_drops_settings_and_follows_mode() {
-    // A resident lemonade model: no Settings (the umbrella honors no
-    // launch knobs); the mode surface + Logs remain. A model with no
-    // llamastash mode surface (Whisper → Unknown) gets Logs alone.
-    let mut app = App::new(AppOptions::default());
-    let mut chat_model = fake("lemonade://qwen-FLM", "lemonade://");
-    chat_model.display_label = Some("qwen-FLM".into());
-    let mut whisper = fake("lemonade://Whisper-Tiny", "lemonade://");
-    whisper.metadata.as_mut().unwrap().mode_hint = ModeHint::Unknown;
-    whisper.display_label = Some("Whisper-Tiny".into());
-    app.models = vec![chat_model, whisper];
-    app.managed = vec![
-      ManagedRow {
-        launch_id: "L1".into(),
-        path: PathBuf::from("lemonade://qwen-FLM"),
-        port: 13305,
-        state: SurfaceState::Ready,
-        device: None,
-        rss_bytes: None,
-        cpu_pct: None,
-        backend: Some(crate::backend::lemonade::LEMONADE_BACKEND_ID.into()),
-        ..Default::default()
-      },
-      ManagedRow {
-        launch_id: "L2".into(),
-        path: PathBuf::from("lemonade://Whisper-Tiny"),
-        port: 13305,
-        state: SurfaceState::Ready,
-        device: None,
-        rss_bytes: None,
-        cpu_pct: None,
-        backend: Some(crate::backend::lemonade::LEMONADE_BACKEND_ID.into()),
-        ..Default::default()
-      },
-    ];
-    // Rows: [TableHeader, Header(▶ Running), qwen, whisper, …].
-    app.list_cursor = 2;
-    assert_eq!(
-      app.available_right_tabs(),
-      vec![RightTab::Logs, RightTab::Chat],
-      "chat-mode delegated row: mode surface without Settings"
-    );
-    app.list_cursor = 3;
-    app.clear_rows_cache();
-    assert_eq!(
-      app.available_right_tabs(),
-      vec![RightTab::Logs],
-      "transcription model has no mode surface: logs only"
+    let tabs = app.available_right_tabs();
+    assert!(
+      tabs.contains(&RightTab::Settings),
+      "running llamacpp chat row carries Settings"
     );
   }
 
@@ -3545,9 +3405,7 @@ mod tests {
     app.ingest_status(&json!({
       "daemon": {"pid": 1},
       "backends": [
-        // No `enabled` field → counts as enabled (llamacpp).
         {"id": "llamacpp", "binary": "/usr/bin/llama-server"},
-        {"id": "lemonade", "enabled": true, "binary": "/usr/bin/lemond"},
         // Disabled rows drop out even with a binary.
         {"id": "future", "enabled": false, "binary": "/usr/bin/future"},
         // No binary resolved → no entry.
@@ -3556,16 +3414,10 @@ mod tests {
     }));
     assert_eq!(
       app.daemon_info.backend_binaries,
-      vec![
-        BackendBinary {
-          id: "llamacpp".into(),
-          binary: "/usr/bin/llama-server".into()
-        },
-        BackendBinary {
-          id: "lemonade".into(),
-          binary: "/usr/bin/lemond".into()
-        },
-      ]
+      vec![BackendBinary {
+        id: "llamacpp".into(),
+        binary: "/usr/bin/llama-server".into()
+      },]
     );
   }
 

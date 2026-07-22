@@ -178,7 +178,7 @@ impl ModelSource {
   /// by the Lemonade managed-multiplexer.
   pub fn backend_id(&self) -> &'static str {
     match self {
-      ModelSource::Lemonade => crate::backend::lemonade::LEMONADE_BACKEND_ID,
+      ModelSource::Lemonade => "lemonade",
       ModelSource::UserPath
       | ModelSource::HuggingFace
       | ModelSource::Ollama

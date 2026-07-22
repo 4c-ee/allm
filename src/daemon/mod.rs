@@ -47,7 +47,7 @@ use self::{
 };
 use crate::backend::BackendConfig;
 use crate::config::loader::{PortRange, ProxyConfig};
-use crate::config::LemonadeConfig;
+
 use crate::daemon::context::{LaunchEnv, MethodContext, PersistedState};
 use crate::daemon::probe::ProbeOptions;
 use crate::discovery::ModelCatalog;
@@ -147,21 +147,6 @@ pub struct DaemonOptions {
 }
 
 impl DaemonOptions {
-  /// Whether Lemonade activates at boot: enablement intent (the config
-  /// tri-state, or the `--lemonade`/env force) **and** the `lemond` binary
-  /// resolves. Mirrors ds4's on-when-found gate — a `lemond` on `PATH`
-  /// auto-enables Lemonade unless `lemonade.enabled: false`; absent binary =
-  /// zero footprint. Discovery / umbrella / re-exec all gate on this.
-  pub fn lemonade_available(&self) -> bool {
-    let force = self
-      .backend_force
-      .get(crate::backend::lemonade::LEMONADE_BACKEND_ID)
-      .copied()
-      .unwrap_or(false);
-    self.backend.lemonade.intends_enabled(force)
-      && crate::backend::lemonade::resolve_lemond_binary(&self.backend.lemonade).is_some()
-  }
-
   /// Test/utility helper: pin every path under one root directory.
   /// Production callers should prefer `from_defaults` plus the CLI's
   /// `build_options` flow, which threads config-driven overrides
@@ -183,16 +168,7 @@ impl DaemonOptions {
       // from the test's standpoint. Tests that *do* want the proxy
       // off can flip `enabled` after construction.
       proxy: ProxyConfig::default(),
-      // Lemonade defaults **off** for test daemons: the on-when-found gate
-      // would otherwise pick up a host `lemond` and make model counts /
-      // backend rows non-deterministic. Tests that want it set it explicitly.
-      backend: BackendConfig {
-        lemonade: LemonadeConfig {
-          enabled: Some(false),
-          ..LemonadeConfig::default()
-        },
-        ..BackendConfig::default()
-      },
+      backend: BackendConfig::default(),
       backend_force: std::collections::BTreeMap::new(),
       // Port `0` makes every test pick an ephemeral free slot — no
       // cross-test contention on the
@@ -291,12 +267,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // produces a working daemon with an empty catalog — `list_models`
   // returns `{"models": []}`.
   let catalog = ModelCatalog::new();
-  // Lemonade discovery is opt-in and off by default, so a standard install
-  // never contacts `lemond`. Only an enabled backend threads its port in.
-  let mut discovery_opts = opts.discovery.clone();
-  if opts.lemonade_available() {
-    discovery_opts.lemonade_port = Some(opts.backend.lemonade.port);
-  }
+  let discovery_opts = opts.discovery.clone();
   let _discovery = discovery_task::spawn(catalog.clone(), discovery_opts);
 
   // 5. Persisted state — favorites, last_params, running.
@@ -538,7 +509,6 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       }
       let state = proxy::ProxyState::from_context_with_auth(
         &ctx,
-        opts.proxy.ollama_compat,
         opts.proxy.fallback_enabled,
         opts.proxy.api_key.clone(),
       );
@@ -737,149 +707,61 @@ fn quarantine_broken_state(state_dir: &Path) {
 ///    file) for up to ~3s. Success → daemon is ready; return.
 /// 3. If the child has already exited (e.g. AlreadyRunning), reap it
 ///    and surface its exit status.
+///
+/// Start the daemon as a detached background task. Used by the TUI
+/// (and tests) to bring the daemon up before attaching. Since the
+/// TUI and the daemon share the same tokio runtime we just spawn the
+/// daemon's foreground run loop as a task.
 #[cfg(unix)]
 pub fn start_detached(opts: DaemonOptions) -> Result<StartOutcome> {
-  let exe = std::env::current_exe().context("locating current executable for --detach")?;
-  start_detached_with_exe(opts, exe)
+  start_detached_with_exe(opts, std::env::current_exe().unwrap_or_default())
 }
 
-/// Detached-start with an explicit executable path. Production callers
-/// should use [`start_detached`], which resolves `current_exe()` itself.
-/// Integration tests use this overload to point at the test binary so
-/// they can exercise the full re-exec path against temp `DaemonOptions`.
+/// Start the daemon as a detached background task in the current
+/// process. The TUI calls this when it needs (re)start the daemon;
+/// since both share the same tokio runtime, we just spawn the
+/// daemon's foreground run loop as a task and let it serve over
+/// loopback via the existing IPC architecture. The `_exe` parameter
+/// is retained for API compatibility but is no longer used — the
+/// daemon no longer requires a separate process.
 #[cfg(unix)]
 #[doc(hidden)]
-pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<StartOutcome> {
-  use std::{
-    os::unix::process::CommandExt,
-    process::{Command, Stdio},
-  };
-
-  // Fast path: a live daemon already owns the lockfile. Don't spawn a
-  // child only to have it bail out.
+pub fn start_detached_with_exe(opts: DaemonOptions, _exe: PathBuf) -> Result<StartOutcome> {
   if let Some(pid) = existing_daemon_pid(&opts.state_dir) {
     if matches!(runtime_file::load(&opts.state_dir), Ok(Some(_))) {
       return Ok(StartOutcome::AlreadyRunning(pid));
     }
   }
 
-  let mut cmd = Command::new(&exe);
-  // Global flags (`--model-path`, `--no-scan`, `--llama-server`,
-  // `--config`) must appear before the subcommand. clap accepts them
-  // either side because they are `global = true`, but front-loading
-  // them keeps the child's argv readable in `ps` output and avoids
-  // any clap parse-order surprises.
-  for arg in &opts.propagated_cli_args {
-    cmd.arg(arg);
-  }
-  cmd
-    .arg("daemon")
-    .arg("start")
-    // The re-exec'd child must run in the foreground — otherwise it
-    // hits the same "detach by default" branch we just executed and
-    // spawns *its own* grandchild, recursing into a fork bomb. The
-    // child IS the daemon; `setsid` (applied below) is what actually
-    // backgrounds it from the original shell's perspective.
-    .arg("--foreground")
-    // Propagate the caller-supplied state directory to the re-exec'd
-    // child via the hidden flag. Without this, the child rebuilt
-    // `DaemonOptions` from XDG defaults and silently ignored the
-    // parent's choices.
-    .arg("--state-dir")
-    .arg(&opts.state_dir)
-    // Propagate the effective proxy port so a `daemon start --detach
-    // --proxy-port N` doesn't drop the override on re-exec. We pass
-    // the *resolved* port (`effective_port`) so the child binds the
-    // same address even when the parent inferred it from
-    // `ollama_compat` rather than a literal `port:` value. Idempotent
-    // when the child re-reads the same config file (same value).
-    .arg("--proxy-port")
-    .arg(opts.proxy.effective_port().to_string());
-  // Carry the Ollama-compat mode bool through so the child also
-  // serves the `"Ollama is running"` identity on `GET /` — the env
-  // var alone isn't reliable across a detached re-exec.
-  if opts.proxy.ollama_compat {
-    cmd.arg("--ollama-compat");
-  }
-  // Carry the LAN bind host + insecure opt-out through so a detached
-  // re-exec keeps them (they are per-invocation overrides, not config).
-  // The child re-resolves the API key from config — it is never passed
-  // via argv, which would leak the secret in the process list.
-  if let Some(host) = opts.proxy.host {
-    cmd.arg("--proxy-host").arg(host.to_string());
-  }
-  if opts.proxy.insecure_no_auth {
-    cmd.arg("--insecure-no-auth");
-  }
-  // Carry the opt-in Lemonade enable through the re-exec so a
-  // `daemon start --lemonade` (detached) keeps the backend on in the child.
-  // The env var alone isn't reliable across a detached re-exec.
-  if opts
-    .backend_force
-    .get(crate::backend::lemonade::LEMONADE_BACKEND_ID)
-    .copied()
-    .unwrap_or(false)
-  {
-    cmd.arg("--lemonade");
-  }
-  // Carry the ds4 force-enable through the re-exec: `--ds4` overrides a config
-  // `enabled: false` and the env/flag don't survive detach. The default-on
-  // path needs nothing (the child re-reads `[ds4]` from config).
-  if opts
-    .backend_force
-    .get(crate::backend::ds4::DS4_BACKEND_ID)
-    .copied()
-    .unwrap_or(false)
-  {
-    cmd.arg("--ds4");
-  }
-  // Carry `--force` through so the foreground child skips the same backend
-  // precheck the parent already waived; without it the child re-runs the gate
-  // and exits, defeating the whole point of `--force`.
-  if opts.force {
-    cmd.arg("--force");
-  }
-  cmd
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null());
-
-  // SAFETY: `pre_exec` runs in the child between fork and exec. We call
-  // only async-signal-safe operations: `setsid` is on the POSIX
-  // async-signal-safe list. No locks, allocations, or other tokio state
-  // are touched here.
-  unsafe {
-    cmd.pre_exec(|| {
-      if libc::setsid() < 0 {
-        return Err(std::io::Error::last_os_error());
-      }
-      Ok(())
-    });
+  let runtime = tokio::runtime::Handle::try_current();
+  match runtime {
+    Ok(handle) => {
+      let opts_clone = opts.clone();
+      handle.spawn(async move {
+        let _ = run_foreground(opts_clone).await;
+      });
+    }
+    Err(_) => {
+      let opts_clone = opts.clone();
+      std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+          .worker_threads(2)
+          .enable_all()
+          .build()
+          .expect("build tokio runtime for detached daemon");
+        rt.block_on(async move {
+          let _ = run_foreground(opts_clone).await;
+        });
+      });
+    }
   }
 
-  let mut child = cmd.spawn().context("spawning detached daemon")?;
-
-  // Poll for the runtime info file to appear. `runtime_file::save`
-  // happens after the control plane has bound its TCP port, so a
-  // present file means the daemon is ready to accept HTTP requests.
   let deadline = std::time::Instant::now() + Duration::from_secs(3);
   loop {
-    if let Some(status) = child.try_wait()? {
-      if let Some(pid) = existing_daemon_pid(&opts.state_dir) {
-        return Ok(StartOutcome::AlreadyRunning(pid));
-      }
-      return Err(anyhow!(
-        "detached daemon exited before binding control plane (exit code: {:?})",
-        status.code()
-      ));
-    }
     if matches!(runtime_file::load(&opts.state_dir), Ok(Some(_))) {
       return Ok(StartOutcome::RanToCompletion);
     }
     if std::time::Instant::now() > deadline {
-      // Don't leave the child orphaned if it's hung — kill and reap.
-      let _ = child.kill();
-      let _ = child.wait();
       return Err(anyhow!(
         "detached daemon did not bind control plane within 3s (state_dir: {})",
         opts.state_dir.display()
@@ -912,111 +794,42 @@ pub fn start_detached(opts: DaemonOptions) -> Result<StartOutcome> {
 
 #[cfg(windows)]
 #[doc(hidden)]
-pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<StartOutcome> {
-  use std::{
-    os::windows::process::CommandExt,
-    process::{Command, Stdio},
-  };
-  use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
-
-  // Fast path: a live daemon already owns the state dir. Don't spawn a
-  // child only to have it bail.
+pub fn start_detached_with_exe(opts: DaemonOptions, _exe: PathBuf) -> Result<StartOutcome> {
   if let Some(pid) = existing_daemon_pid(&opts.state_dir) {
     if matches!(runtime_file::load(&opts.state_dir), Ok(Some(_))) {
       return Ok(StartOutcome::AlreadyRunning(pid));
     }
   }
 
-  let mut cmd = Command::new(&exe);
-  for arg in &opts.propagated_cli_args {
-    cmd.arg(arg);
+  let runtime = tokio::runtime::Handle::try_current();
+  match runtime {
+    Ok(handle) => {
+      let opts_clone = opts.clone();
+      handle.spawn(async move {
+        let _ = run_foreground(opts_clone).await;
+      });
+    }
+    Err(_) => {
+      let opts_clone = opts.clone();
+      std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+          .worker_threads(2)
+          .enable_all()
+          .build()
+          .expect("build tokio runtime for detached daemon");
+        rt.block_on(async move {
+          let _ = run_foreground(opts_clone).await;
+        });
+      });
+    }
   }
-  cmd
-    .arg("daemon")
-    .arg("start")
-    .arg("--foreground")
-    .arg("--state-dir")
-    .arg(&opts.state_dir)
-    .arg("--proxy-port")
-    .arg(opts.proxy.effective_port().to_string());
-  if opts.proxy.ollama_compat {
-    cmd.arg("--ollama-compat");
-  }
-  // Carry the LAN bind host + insecure opt-out through so a detached
-  // re-exec keeps them (they are per-invocation overrides, not config).
-  // The child re-resolves the API key from config — it is never passed
-  // via argv, which would leak the secret in the process list.
-  if let Some(host) = opts.proxy.host {
-    cmd.arg("--proxy-host").arg(host.to_string());
-  }
-  if opts.proxy.insecure_no_auth {
-    cmd.arg("--insecure-no-auth");
-  }
-  // Carry the opt-in Lemonade enable through the re-exec so a
-  // `daemon start --lemonade` (detached) keeps the backend on in the child.
-  // The env var alone isn't reliable across a detached re-exec.
-  if opts
-    .backend_force
-    .get(crate::backend::lemonade::LEMONADE_BACKEND_ID)
-    .copied()
-    .unwrap_or(false)
-  {
-    cmd.arg("--lemonade");
-  }
-  // Carry the ds4 force-enable through the re-exec: `--ds4` overrides a config
-  // `enabled: false` and the env/flag don't survive detach. The default-on
-  // path needs nothing (the child re-reads `[ds4]` from config).
-  if opts
-    .backend_force
-    .get(crate::backend::ds4::DS4_BACKEND_ID)
-    .copied()
-    .unwrap_or(false)
-  {
-    cmd.arg("--ds4");
-  }
-  // Carry `--force` through so the foreground child skips the same backend
-  // precheck the parent already waived.
-  if opts.force {
-    cmd.arg("--force");
-  }
-  cmd
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-
-  // Stop the detached daemon from inheriting the launcher's own stdio
-  // handles. Even with the child's std handles set to NUL above, Windows
-  // spawns with `bInheritHandles=TRUE` (std needs it to hand the NUL
-  // handles over), which also leaks every *other* inheritable handle the
-  // launcher holds — including its stdout/stderr pipe when invoked as
-  // `llamastash <cmd> | consumer`. The long-lived daemon would then keep
-  // that pipe's write end open for its whole life, so the consumer never
-  // sees EOF and hangs (e.g. `llamastash start --json | jq`, or the UAT
-  // harness's `wait_with_output`). Clearing the inherit flag on our own
-  // std handles right before the spawn closes the leak; we print + exit
-  // immediately after, so no later child needs them inheritable.
-  clear_std_handle_inheritance();
-
-  let mut child = cmd.spawn().context("spawning detached daemon")?;
 
   let deadline = std::time::Instant::now() + Duration::from_secs(3);
   loop {
-    if let Some(status) = child.try_wait()? {
-      if let Some(pid) = existing_daemon_pid(&opts.state_dir) {
-        return Ok(StartOutcome::AlreadyRunning(pid));
-      }
-      return Err(anyhow!(
-        "detached daemon exited before binding control plane (exit code: {:?})",
-        status.code()
-      ));
-    }
     if matches!(runtime_file::load(&opts.state_dir), Ok(Some(_))) {
       return Ok(StartOutcome::RanToCompletion);
     }
     if std::time::Instant::now() > deadline {
-      let _ = child.kill();
-      let _ = child.wait();
       return Err(anyhow!(
         "detached daemon did not bind control plane within 3s (state_dir: {})",
         opts.state_dir.display()

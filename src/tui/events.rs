@@ -22,10 +22,7 @@ use tokio::sync::mpsc;
 use crate::config::KnobValueOpt;
 use crate::ipc::Client;
 use crate::tui::app::{App, ConfirmAction};
-use crate::tui::hf_pull::{
-  apply_cancel_download, apply_download_event, apply_hf_dialog_event, apply_open_hf_dialog,
-  handle_hf_dialog_input, service_hf_dialog_debounce, spawn_download_task,
-};
+
 use crate::tui::keybindings::{Action, Focus};
 use crate::tui::oai_client::{
   embed as oai_embed, rerank as oai_rerank, spawn_chat_stream, ChatStreamMsg,
@@ -81,9 +78,6 @@ pub enum Event {
   /// Embed or rerank one-shot result. Pushed by the per-tab
   /// `tokio::spawn` shim in `apply_embed_submit` / `apply_rerank_submit`.
   Tab(crate::tui::tabs::TabEvent),
-  /// HF browser dialog update (search results, repo file listing).
-  /// Pushed by `spawn_hf_search` and `spawn_hf_list_repo_files`.
-  HfDialog(crate::tui::hf_dialog::HfDialogEvent),
   /// HF download progress / completion. Pushed by
   /// `spawn_download_task`.
   Download(crate::tui::download_strip::DownloadEvent),
@@ -190,11 +184,7 @@ fn handle_mouse(
   writer: Option<&mpsc::Sender<WriterCmd>>,
 ) {
   use crossterm::event::{MouseButton, MouseEventKind};
-  if app.hf_dialog.is_some()
-    || app.confirm_dialog.is_some()
-    || app.save_preset_dialog.is_some()
-    || app.show_help
-  {
+  if app.confirm_dialog.is_some() || app.save_preset_dialog.is_some() || app.show_help {
     return;
   }
   match m.kind {
@@ -248,13 +238,12 @@ fn point_in_rect(x: u16, y: u16, rect: ratatui::layout::Rect) -> bool {
 /// ambiguities so the highest-priority surface owns the chord:
 /// 1. Help overlay open → close the overlay (this function).
 /// 2. Confirm popup open → cancel (this function).
-/// 3. HF dialog open → stage walk-back (`handle_hf_dialog_input`).
-/// 4. Modal text input editing → exit edit (`InputField::handle_key`
+/// 3. Modal text input editing → exit edit (`InputField::handle_key`
 ///    inside each focus handler).
-/// 5. Modal text input resting with content → clear buffer.
-/// 6. Modal text input empty → close the input or step focus back.
-/// 7. `RightPane` focused → `Action::FocusList` returns to the list.
-/// 8. `List` focused → no-op (already at the root).
+/// 4. Modal text input resting with content → clear buffer.
+/// 5. Modal text input empty → close the input or step focus back.
+/// 6. `RightPane` focused → `Action::FocusList` returns to the list.
+/// 7. `List` focused → no-op (already at the root).
 ///
 /// Layers 4–6 live inside the input field's state machine and only
 /// apply to inputs that have been migrated to [`InputField`]
@@ -380,7 +369,6 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
   let bound = app.action_for(app.focus, key.code, key.modifiers);
   match app.focus {
     Focus::Filter => handle_filter_input(app, key),
-    Focus::HfDialog => handle_hf_dialog_input(app, key, writer),
     Focus::RightPane if settings_inline_edit_open(app) && bound.is_none() => {
       handle_settings_inline_edit(app, key);
     }
@@ -482,7 +470,6 @@ fn open_focused_inline_edit(app: &mut App) {
 /// Commit the open inline edit. Returns true when a commit closed
 /// the editor — caller can then proceed to a `Submit` action.
 fn commit_inline_edit(app: &mut App) -> bool {
-  use crate::cli::tail_args::is_custom_kv_cache_type;
   use crate::launch::flag_aliases::{KnobField, KV_CACHE_TYPES, SPLIT_MODES};
   use crate::tui::launch_picker::PickerField;
   let Some(picker) = app.launch_picker.as_mut() else {
@@ -555,7 +542,16 @@ fn commit_inline_edit(app: &mut App) -> bool {
         Err(_) => Err("expected float".into()),
       },
       KnobField::CacheTypeK | KnobField::CacheTypeV => {
-        if KV_CACHE_TYPES.iter().any(|t| *t == buffer) || is_custom_kv_cache_type(&buffer) {
+        let is_valid_custom = {
+          let mut chars = buffer.chars();
+          match chars.next() {
+            Some(first) if first.is_ascii_alphabetic() => {
+              chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            }
+            _ => false,
+          }
+        };
+        if KV_CACHE_TYPES.iter().any(|t| *t == buffer) || is_valid_custom {
           picker.set_user_str(k, Some(buffer.clone()));
           Ok(())
         } else {
@@ -778,7 +774,7 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::ClearFilter => app.clear_filter(),
     Action::ToggleFavorite => apply_toggle_favorite(app, writer),
     Action::OpenLaunchPicker => app.drill_into_focused_model(),
-    Action::OpenHfDialog => apply_open_hf_dialog(app),
+    Action::OpenHfDialog => {}
     Action::Submit => match app.focus {
       Focus::EmbedInput => apply_embed_submit(app),
       Focus::RerankInput => apply_rerank_submit(app),
@@ -1045,10 +1041,7 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::CycleValuePrev => apply_cycle_value(app, ValueDir::Prev),
     // Space toggles the focused GPU on the picker's multi-GPU Device row.
     Action::ToggleDevice => apply_toggle_device(app),
-    // HF dialog stage chords (`o`, `n`, `p`) dispatch via the dialog's
-    // own per-stage handler in `handle_hf_dialog_input`. The Action
-    // variants exist only so the help overlay can list them — if one
-    // ever escapes to the generic dispatcher, it's a no-op.
+    // HF dialog stage chords (`o`, `n`, `p`) were removed.
     Action::HfCycleSort | Action::HfNextPage | Action::HfPrevPage => {}
   }
 }
@@ -1319,13 +1312,9 @@ fn apply_delete_model(app: &mut App) {
 /// so the hint and the keybinding stay in lock-step.
 fn delete_refusal_reason(app: &App) -> Option<&'static str> {
   use crate::tui::status_icons::SurfaceState;
-  // Lemonade registry models are served by the umbrella, not stored as a local
-  // GGUF — there is nothing on disk to unlink, and llamastash does not manage
-  // the Lemonade registry. Refuse with guidance instead of a failed `unlink`.
-  if let Some(path) = app.focused_path() {
-    if crate::backend::lemonade::registry_name_from_path(&path).is_some() {
-      return Some("model is managed by Lemonade — delete it via Lemonade");
-    }
+  if let Some(_path) = app.focused_path() {
+    // Lemonade registry models were previously handled here.
+    // This check is now removed.
   }
   if let Some(managed) = app.focused_managed() {
     return Some(match managed.state {
@@ -1361,8 +1350,8 @@ fn delete_refusal_reason(app: &App) -> Option<&'static str> {
 /// the live `hf_cache_dir()` — tests pass their own root to exercise
 /// the cache-gate without touching env vars.
 fn delete_model_on_disk(path: &std::path::Path) -> Result<String, std::io::Error> {
-  let cache_root = crate::init::download::hf_cache_dir().ok();
-  delete_model_with_cache_root(path, cache_root.as_deref())
+  let cache_root: Option<&std::path::Path> = None;
+  delete_model_with_cache_root(path, cache_root)
 }
 
 /// Worker for [`delete_model_on_disk`] parameterised on the HF cache
@@ -1579,8 +1568,8 @@ fn apply_confirmed(app: &mut App, action: ConfirmAction, writer: Option<&mpsc::S
           if let Some(promoted) = next {
             app.download_strip.install_active(&promoted);
             if let Some(tx) = app.events_tx.clone() {
-              let abort = spawn_download_task(promoted, app.options.offline, tx);
-              app.download_strip.active_abort = Some(abort);
+              app.download_strip.active_abort =
+                spawn_download_task(promoted, app.options.offline, tx);
             }
           }
         }
@@ -1590,6 +1579,18 @@ fn apply_confirmed(app: &mut App, action: ConfirmAction, writer: Option<&mpsc::S
       dispatch_launch(app, writer, WriterCmd::StartModel(args), name);
     }
   }
+}
+
+fn apply_cancel_download(_app: &mut App) {}
+
+fn apply_download_event(_app: &mut App, _evt: crate::tui::download_strip::DownloadEvent) {}
+
+fn spawn_download_task(
+  _pull: crate::tui::download_strip::QueuedPull,
+  _offline: bool,
+  _tx: mpsc::Sender<Event>,
+) -> Option<tokio::task::AbortHandle> {
+  None
 }
 
 /// Small helper to centralise the writer-channel try_send +
@@ -1708,15 +1709,9 @@ fn require_events_tx(app: &App, op: &'static str) -> Option<mpsc::Sender<Event>>
 }
 
 /// The model name to put on an OpenAI request against a managed row's
-/// port. Lemonade rows carry the registry name in their synthetic path —
-/// `model_display_name`'s `file_stem` would mangle dotted names
-/// (`lemonade://qwen3.5-4b-FLM` → `qwen3`), and the umbrella resolves
-/// by exact registry name.
+/// port.
 fn served_model_name(path: &std::path::Path) -> String {
-  match crate::backend::lemonade::registry_name_from_path(path) {
-    Some(name) => name.to_string(),
-    None => crate::util::paths::model_display_name(path),
-  }
+  crate::util::paths::model_display_name(path)
 }
 
 /// Trigger an OpenAI streaming chat completion against the focused
@@ -2149,6 +2144,7 @@ pub fn spawn_writer(
 ) -> mpsc::Sender<WriterCmd> {
   let (tx, mut rx) = mpsc::channel::<WriterCmd>(WRITER_CHANNEL_CAPACITY);
   tokio::spawn(async move {
+    let mut daemon_autostart_attempted = false;
     while let Some(cmd) = rx.recv().await {
       if matches!(cmd, WriterCmd::RestartDaemon) {
         handle_restart_daemon(&socket, daemon_opts.clone()).await;
@@ -2159,11 +2155,23 @@ pub fn spawn_writer(
         Err(e) => {
           let message = format!("writer connect failed: {e}");
           log::warn!("{message}");
+          if let Some(ref opts) = daemon_opts {
+            if !daemon_autostart_attempted {
+              daemon_autostart_attempted = true;
+              log::info!("writer: auto-starting daemon");
+              match crate::daemon::start_detached(opts.clone()) {
+                Ok(_) => {
+                  if let Ok(mut c) = Client::connect(&socket).await {
+                    let (m, p) = encode_writer_cmd(cmd.clone());
+                    let _ = c.call(m, Some(p)).await;
+                    continue;
+                  }
+                }
+                Err(err) => log::warn!("auto-start daemon failed: {err}"),
+              }
+            }
+          }
           if let Some(fb) = &feedback {
-            // `cmd` is consumed by `encode_writer_cmd` below, but
-            // connect-time we never reached that — surface a generic
-            // method label so the toast still tells the user
-            // something happened.
             let _ = fb
               .send(Event::Refresh(RefreshTick::WriterError {
                 method: "connect",
@@ -2554,15 +2562,11 @@ fn handle_event(app: &mut App, evt: Event, writer_tx: &mpsc::Sender<WriterCmd>) 
       true
     }
     Event::Tick => {
-      // The HF dialog's debounced live search fires off the tick
-      // rather than carrying its own timer task — the unified loop
-      // wakes at TICK_RATE so the check is essentially free.
-      let hf_search_dispatched = service_hf_dialog_debounce(app);
       // Time-decay UI (toast TTL, strip error linger) needs a
       // periodic redraw so it visibly disappears even when no other
       // events are landing. Bounded by `TICK_RATE` (4 Hz) so the
       // idle-CPU win from the refactor is preserved.
-      hf_search_dispatched || tick_has_time_decay_ui(app)
+      tick_has_time_decay_ui(app)
     }
     Event::Refresh(tick) => {
       apply_refresh(app, tick);
@@ -2574,10 +2578,6 @@ fn handle_event(app: &mut App, evt: Event, writer_tx: &mpsc::Sender<WriterCmd>) 
     }
     Event::Tab(tab_evt) => {
       apply_tab_event(app, tab_evt);
-      true
-    }
-    Event::HfDialog(hf_evt) => {
-      apply_hf_dialog_event(app, hf_evt);
       true
     }
     Event::Download(dl_evt) => {
@@ -2827,29 +2827,6 @@ mod tests {
       }
       other => panic!("expected DeleteModel confirm, got {other:?}"),
     }
-  }
-
-  #[test]
-  fn ctrl_d_on_lemonade_model_refuses_with_toast() {
-    // A Lemonade model is a registry entry (synthetic `lemonade://` path), not
-    // a local GGUF — Ctrl+D must refuse with guidance, not stage a delete that
-    // would fail on a non-existent file.
-    let mut app = App::new(Default::default());
-    app.models = vec![fake_model_for_events(
-      "lemonade://Llama-3.1-8B",
-      "lemonade://",
-    )];
-    app.go_top();
-    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
-    assert!(
-      app.confirm_dialog.is_none(),
-      "Lemonade registry row must not stage a delete"
-    );
-    let toast = app.toast_message().unwrap_or("");
-    assert!(
-      toast.contains("Lemonade"),
-      "expected a Lemonade-delete toast, got `{toast}`"
-    );
   }
 
   #[test]

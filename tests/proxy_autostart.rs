@@ -118,7 +118,7 @@ async fn build_state(
   let ctx = MethodContext::with_catalog(token, catalog)
     .with_supervisors(SupervisorRegistry::new())
     .with_launch_env(env);
-  let state = ProxyState::from_context(&ctx, false, true);
+  let state = ProxyState::from_context(&ctx, true);
   (state, ctx)
 }
 

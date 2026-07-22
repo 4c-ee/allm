@@ -14,7 +14,6 @@ use serde_json::{json, Value};
 use crate::backend::Backend;
 use crate::daemon::context::MethodContext;
 use crate::daemon::host_metrics::HostMetricsSnapshot;
-use crate::ipc::methods::flatten_state;
 
 /// Snapshot every active managed model plus the daemon's GPU info.
 /// `status` is read-only; never triggers any state-machine transitions.
@@ -120,97 +119,6 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
       "default": preset_default,
     });
     models.push(row);
-  }
-  // Delegated Lemonade models — the registry holds only the shared
-  // umbrella (one row whose path is the `lemond` binary), but every
-  // model made resident via `start_model` persisted a RunningSnapshot
-  // at the umbrella's port. Project each as a first-class row: the
-  // synthetic `lemonade://<name>` path matches the catalog entry, so
-  // the TUI list pane and `llamastash list` show the *model* as
-  // running, not just the umbrella. State comes from the preload
-  // task's recorded outcome (`Loading` / `Ready` / `Error{cause}`);
-  // a snapshot with no recorded outcome (re-adopted across a daemon
-  // restart) falls back to mirroring the umbrella. Rows are emitted
-  // only while the umbrella is registered; with it gone the
-  // snapshots are unreachable leftovers (the boot sweep reaps them).
-  if let Some(umbrella) = ctx
-    .supervisors
-    .get(&crate::backend::lemonade::umbrella_launch_id())
-    .await
-  {
-    let ustate = umbrella.state().await;
-    let umbrella_ready = matches!(ustate, crate::daemon::supervisor::ManagedState::Ready);
-    let ustate_obj = flatten_state(&ustate);
-    // The umbrella's own resource reading, mirrored onto every delegated model
-    // row — they run inside this one shared process, so its RSS/CPU is the only
-    // honest figure. The TUI marks these as shared (`*`) so they don't read as
-    // per-model; nothing sums the per-row rss, so the mirror never double-counts.
-    let ulatest = umbrella.latest_resource().await;
-    let u_rss = ulatest.as_ref().map(|r| r.rss_bytes);
-    let u_cpu = ulatest.as_ref().map(|r| r.cpu_percent);
-    for running_snap in ctx.state.snapshot().await.running.iter() {
-      let Some(backend_id) = running_snap.delegated_backend_id() else {
-        continue;
-      };
-      // The `L#` stamped at launch (delegated rows have no supervisor to hold
-      // it). A lemonade snapshot without one is an unreachable leftover — skip
-      // it rather than emit a row the client can't stop.
-      let Some(launch_id) = running_snap.launch_id.clone() else {
-        continue;
-      };
-      // The cached per-model state is `Ready` from preload and is never
-      // updated when the umbrella dies out-of-band (crash / external kill).
-      // Trust it only while the umbrella is actually Ready; otherwise the model
-      // can't be resident, so reflect the umbrella's real state instead of a
-      // stale green row.
-      let state_obj = match ctx.supervisors.delegated_state(&backend_id.name).await {
-        Some(s) if umbrella_ready => flatten_state(&s),
-        _ => ustate_obj.clone(),
-      };
-      let synthetic_id = crate::gguf::identity::ModelId {
-        path: running_snap.params.model_path.clone(),
-        header_blake3: [0u8; 32],
-      };
-      let params_json = json!({
-        "model_path": running_snap.params.model_path,
-        "mode": running_snap.params.mode.label(),
-        "ctx": running_snap.params.ctx,
-        "port": running_snap.params.port,
-        "reasoning": running_snap.params.reasoning,
-        "server": running_snap.params.server,
-        "knobs": &running_snap.params.knobs,
-        "backend_knobs": &running_snap.params.backend_knobs,
-        "extras": running_snap.params.extras
-          .iter()
-          .map(|s| s.to_string_lossy().into_owned())
-          .collect::<Vec<_>>(),
-      });
-      let (preset_count, preset_default) = super::methods::preset_hint(
-        &running_snap.params.model_path.display().to_string(),
-        &preset_rows,
-        &preset_store,
-      );
-      models.push(json!({
-        "launch_id": launch_id,
-        "id": synthetic_id,
-        "port": running_snap.port,
-        "mode": running_snap.params.mode.label(),
-        // A delegated model has no process of its own — it runs inside the
-        // shared umbrella. Report no pid (`-` in the CLI table, `null` in JSON);
-        // only the umbrella's own row carries the pid.
-        "pid": null,
-        "ready_at": running_snap.started_at,
-        "state": state_obj,
-        "params": params_json,
-        "backend": running_snap.resolved_backend.clone(),
-        // The shared umbrella's RSS/CPU (see `u_rss`/`u_cpu` above), surfaced
-        // per delegated row and flagged shared by the TUI.
-        "latest_rss_bytes": u_rss,
-        "latest_cpu_pct": u_cpu,
-        "preset_count": preset_count,
-        "default": preset_default,
-      }));
-    }
   }
   // External — read-only rows for `llama-server` processes the
   // daemon doesn't own. Populated by the startup orphan sweep.
@@ -477,42 +385,15 @@ fn project_proxy_status(cell: &crate::proxy::StatusCell) -> Value {
 
 #[cfg(test)]
 mod tests {
-  use std::path::PathBuf;
-
   use serde_json::{json, Value};
 
   use crate::daemon::context::MethodContext;
   use crate::daemon::shutdown::ShutdownToken;
   use crate::ipc::methods::dispatch_request;
   use crate::ipc::protocol::Request;
-  use crate::launch::mode::LaunchMode;
-  use crate::launch::params::LaunchParams;
 
   fn ctx() -> MethodContext {
     MethodContext::new(ShutdownToken::new())
-  }
-
-  /// A delegated-lemonade snapshot the way `start_delegated_lemonade`
-  /// persists one: Backend identity + the synthetic `lemonade://` path +
-  /// the registry-assigned `L#` handle.
-  fn lemonade_running_snapshot(
-    name: &str,
-    port: u16,
-    launch_id: &str,
-  ) -> crate::daemon::state_store::RunningSnapshot {
-    let path = PathBuf::from(format!("lemonade://{name}"));
-    let (id, resolved_backend) = crate::backend::synthetic_identity_for_path(&path)
-      .expect("a lemonade:// path mints a synthetic backend identity");
-    crate::daemon::state_store::RunningSnapshot {
-      id,
-      pid: 0,
-      port,
-      started_at: 0,
-      launch_id: Some(crate::daemon::registry::LaunchId(launch_id.to_string())),
-      params: LaunchParams::new(path, LaunchMode::Chat),
-      actuals: Default::default(),
-      resolved_backend,
-    }
   }
 
   #[tokio::test]
@@ -567,12 +448,6 @@ mod tests {
       ids.contains(&"llamacpp"),
       "backends must list llamacpp: {ids:?}"
     );
-    assert!(
-      ids.contains(&"lemonade"),
-      "backends must list lemonade: {ids:?}"
-    );
-    // Each row carries the installed/lifecycle/accelerator fields;
-    // llama.cpp always offers CPU.
     let llama = backends
       .iter()
       .find(|b| b["id"] == "llamacpp")
@@ -586,20 +461,6 @@ mod tests {
       .filter_map(|v| v.as_str())
       .collect();
     assert!(accel.contains(&"cpu"), "llama.cpp floor is cpu: {accel:?}");
-    // The Lemonade row is a managed-multiplexer offering cpu+npu.
-    let lemon = backends
-      .iter()
-      .find(|b| b["id"] == "lemonade")
-      .expect("lemonade row");
-    assert!(lemon["installed"].is_boolean());
-    assert_eq!(lemon["lifecycle"], json!("managed_multiplexer"));
-    let lacc: Vec<&str> = lemon["accelerators"]
-      .as_array()
-      .unwrap()
-      .iter()
-      .filter_map(|v| v.as_str())
-      .collect();
-    assert!(lacc.contains(&"npu"), "lemonade offers npu: {lacc:?}");
   }
 
   #[tokio::test]
@@ -659,26 +520,14 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn status_omits_delegated_lemonade_rows_without_umbrella() {
-    // A snapshot with no registered umbrella is an unreachable leftover
-    // (umbrella crashed / was stopped): emitting a row for it would
-    // offer a stop affordance against nothing. The happy path (umbrella
-    // up → rows emitted) is covered in `lemonade_umbrella_test.rs`.
+  async fn status_omits_dangling_running_snapshots() {
     let c = ctx();
-    c.state
-      .mutate(|s| {
-        s.running
-          .push(lemonade_running_snapshot("Qwen-X", 13305, "L1"))
-      })
-      .await;
     let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
     let body = resp.result.expect("status result");
     let models = body["models"].as_array().expect("models array");
     assert!(
-      !models
-        .iter()
-        .any(|m| m["backend"] == crate::backend::lemonade::LEMONADE_BACKEND_ID),
-      "no delegated rows without a registered umbrella: {models:?}"
+      !models.iter().any(|m| m["backend"] == "lemonade"),
+      "no rows for vanished backend: {models:?}"
     );
   }
 

@@ -416,44 +416,6 @@ mod tests {
   }
 
   #[test]
-  fn kv_bytes_models_deepseek4_compressed_cache() {
-    // ds4 keeps, per layer, a raw window (4096 rows) plus a compressed cache
-    // of ctx/ratio rows (ratio 0 = raw only); each row is key_length=512 F32
-    // latents. Toy 4-layer model, ratios [0, 4, 128, 0], ctx=8192.
-    let ratios = [0i32, 4, 128, 0];
-    let bytes = FixtureBuilder::new()
-      .with_arch("deepseek4")
-      .with_block_count(4)
-      .with_head_count(64)
-      .with_kv("deepseek4.attention.key_length", GgufValue::U32(512))
-      .with_kv(
-        "deepseek4.attention.compress_ratios",
-        GgufValue::Array(ratios.iter().map(|n| GgufValue::I32(*n)).collect()),
-      )
-      .build();
-    let h = parse(bytes);
-    let kv = kv_bytes(
-      &h,
-      Some("deepseek4"),
-      EstimateOptions {
-        ctx_len: 8192,
-        ..EstimateOptions::default()
-      },
-    );
-    // rows = 4×raw(4096) + 8192/4 + 8192/128 = 16384 + 2048 + 64 = 18496.
-    let expected = (4 * 4096 + 8192 / 4 + 8192 / 128) * 512 * 4;
-    assert_eq!(kv, expected);
-    // Well under the naive GQA figure the generic path would produce
-    // (head_count_kv=1 × key_length=512 × full ctx), which ignores the
-    // sequence compression — the whole reason for the dedicated branch.
-    let naive: u64 = 4 * 512 * 8192 * 4;
-    assert!(
-      kv < naive,
-      "compression must undercut naive GQA: {kv} vs {naive}"
-    );
-  }
-
-  #[test]
   fn kv_bytes_caps_sliding_window_layers() {
     // gemma-style: sliding layers (pattern=1) use the smaller `*_swa`
     // head dim and cap their context at the window; full layers

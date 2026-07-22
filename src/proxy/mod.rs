@@ -17,13 +17,11 @@ pub(crate) mod failure_tracker;
 pub(crate) mod forward;
 pub(crate) mod launch;
 pub(crate) mod mru;
-pub(crate) mod ollama_compat;
 pub(crate) mod openai;
 pub(crate) mod route;
 pub(crate) mod router;
 pub mod server;
 pub mod state;
-pub(crate) mod ui;
 
 pub use auth::{ProxyApiKey, ProxyAuth};
 pub use server::{serve, ProxyStatus, StatusCell};

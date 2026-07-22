@@ -70,20 +70,13 @@ pub struct ProxyState {
   /// persisted state / launch env through it so there is no
   /// duplicate-state risk.
   pub(crate) ctx: MethodContext,
-  /// `true` when the daemon is running in Ollama drop-in mode (see
-  /// [`crate::config::loader::ProxyConfig::ollama_compat`]). Drives
-  /// the `GET /` identity body (`"Ollama is running"` vs the default
-  /// `"LlamaStash is running"`); no other surface branches on it. Set
-  /// once at daemon startup; never mutated thereafter.
-  pub(crate) ollama_compat: bool,
   /// `true` when the family-MRU fallback is enabled (the default). When
   /// `false`, a failed auto-start returns a 503 `launch_failed`
   /// envelope directly instead of picking another Ready supervisor and
   /// serving the request with `x-llamastash-fallback-reason`. Set once
   /// at daemon startup from
-  /// [`crate::config::loader::ProxyConfig::fallback_enabled`] (after
-  /// the CLI / env OR-chain that may force it off); never mutated
-  /// thereafter.
+  /// [`crate::config::loader::ProxyConfig::fallback_enabled`]; never
+  /// mutated thereafter.
   pub(crate) fallback_enabled: bool,
   /// Bearer-token policy for the data routes. Built from the resolved
   /// `ProxyConfig::api_key`; when no key is configured this is the
@@ -106,26 +99,18 @@ impl ProxyState {
 
   /// Project the relevant handles out of an existing [`MethodContext`].
   /// The proxy task receives this handle from `run_foreground` after
-  /// the rest of the daemon context has been assembled. `ollama_compat`
-  /// and `fallback_enabled` reflect the resolved bools from
-  /// `ProxyConfig` (after the CLI / env OR-chain). Auth is disabled
-  /// (loopback, same-UID posture) — production uses
+  /// the rest of the daemon context has been assembled. `fallback_enabled`
+  /// reflects the resolved bool from `ProxyConfig` (after the env OR-chain).
+  /// Auth is disabled (loopback, same-UID posture) by default; use
   /// [`Self::from_context_with_auth`] to attach a bearer key.
-  pub fn from_context(
-    ctx: &MethodContext,
-    ollama_compat: bool,
-    fallback_enabled: bool,
-  ) -> Arc<Self> {
-    Self::from_context_with_auth(ctx, ollama_compat, fallback_enabled, None)
+  pub fn from_context(ctx: &MethodContext, fallback_enabled: bool) -> Arc<Self> {
+    Self::from_context_with_auth(ctx, fallback_enabled, None)
   }
 
   /// Like [`Self::from_context`] but with a resolved bearer `api_key`
-  /// (`None` disables auth). The daemon's `run_foreground` passes the
-  /// resolved `ProxyConfig::api_key` here; tests use the keyless
-  /// [`Self::from_context`].
+  /// (`None` disables auth).
   pub fn from_context_with_auth(
     ctx: &MethodContext,
-    ollama_compat: bool,
     fallback_enabled: bool,
     api_key: Option<String>,
   ) -> Arc<Self> {
@@ -136,7 +121,6 @@ impl ProxyState {
       mru: MruTracker::new(),
       failures: Arc::new(FailureTracker::new()),
       ctx: ctx.clone(),
-      ollama_compat,
       fallback_enabled,
       auth: super::auth::ProxyAuth::new(api_key),
     })

@@ -465,7 +465,7 @@ mod tests {
   async fn spawn_proxy_on_ephemeral_port() -> (SocketAddr, ShutdownToken, StatusCell, JoinHandle<()>)
   {
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context(&ctx, false, true);
+    let state = ProxyState::from_context(&ctx, true);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     let status_for_task = Arc::clone(&status);
@@ -491,7 +491,7 @@ mod tests {
     api_key: &str,
   ) -> (SocketAddr, ShutdownToken, StatusCell, JoinHandle<()>) {
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context_with_auth(&ctx, false, true, Some(api_key.to_string()));
+    let state = ProxyState::from_context_with_auth(&ctx, true, Some(api_key.to_string()));
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     let status_for_task = Arc::clone(&status);
@@ -539,18 +539,35 @@ mod tests {
     extract_body_when_complete(&buf).unwrap_or((0, buf))
   }
 
+  fn extract_body_when_complete(buf: &[u8]) -> Option<(u16, Vec<u8>)> {
+    let needle = b"\r\n\r\n";
+    let split = buf.windows(needle.len()).position(|w| w == needle)?;
+    let head = std::str::from_utf8(&buf[..split]).ok()?;
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next()?;
+    let status: u16 = status_line.split_whitespace().nth(1)?.parse().ok()?;
+    let mut content_length: Option<usize> = None;
+    for line in lines {
+      if let Some(v) = line
+        .strip_prefix("Content-Length:")
+        .or_else(|| line.strip_prefix("content-length:"))
+      {
+        content_length = v.trim().parse().ok();
+      }
+    }
+    let body_start = split + needle.len();
+    let need = content_length?;
+    if buf.len() < body_start + need {
+      return None;
+    }
+    let body = buf[body_start..body_start + need].to_vec();
+    Some((status, body))
+  }
+
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-  async fn auth_gates_data_routes_but_not_health_or_identity() {
+  async fn auth_gates_data_routes() {
     let key = "sk-llamastash-testkey123";
     let (addr, shutdown, _status, handle) = spawn_proxy_with_key(key).await;
-
-    // Liveness / identity probes stay open with no Authorization.
-    assert_eq!(http_get_auth(addr, "/", None).await.0, 200, "GET / exempt");
-    assert_eq!(
-      http_get_auth(addr, "/health", None).await.0,
-      200,
-      "GET /health exempt"
-    );
 
     // Data route with no bearer → 401 + OpenAI auth envelope.
     let (status, body) = http_get_auth(addr, "/v1/models", None).await;
@@ -599,80 +616,6 @@ mod tests {
     None
   }
 
-  /// Minimal HTTP/1.1 client used by the inline tests. We don't
-  /// want to pull `reqwest` into the unit tests just for two
-  /// request/response cycles — and the keep-alive test needs
-  /// explicit control over the TCP socket anyway.
-  async fn http_get_keepalive(
-    sock: &mut tokio::net::TcpStream,
-    host: &str,
-    path: &str,
-  ) -> (u16, Vec<u8>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: keep-alive\r\n\r\n");
-    sock.write_all(req.as_bytes()).await.expect("write");
-    // Read until we have headers + body. We control both sides so a
-    // simple read-until-content-length-bytes loop is enough.
-    let mut buf = Vec::with_capacity(512);
-    let mut tmp = [0u8; 1024];
-    loop {
-      let n = sock.read(&mut tmp).await.expect("read");
-      if n == 0 {
-        break;
-      }
-      buf.extend_from_slice(&tmp[..n]);
-      // Stop once the body is complete (Content-Length present).
-      if let Some(body) = extract_body_when_complete(&buf) {
-        return body;
-      }
-    }
-    panic!("connection closed before body arrived; got: {buf:?}");
-  }
-
-  fn extract_body_when_complete(buf: &[u8]) -> Option<(u16, Vec<u8>)> {
-    let needle = b"\r\n\r\n";
-    let split = buf.windows(needle.len()).position(|w| w == needle)?;
-    let head = std::str::from_utf8(&buf[..split]).ok()?;
-    let mut lines = head.split("\r\n");
-    let status_line = lines.next()?;
-    let status: u16 = status_line.split_whitespace().nth(1)?.parse().ok()?;
-    let mut content_length: Option<usize> = None;
-    for line in lines {
-      if let Some(v) = line
-        .strip_prefix("Content-Length:")
-        .or_else(|| line.strip_prefix("content-length:"))
-      {
-        content_length = v.trim().parse().ok();
-      }
-    }
-    let body_start = split + needle.len();
-    let need = content_length?;
-    if buf.len() < body_start + need {
-      return None;
-    }
-    let body = buf[body_start..body_start + need].to_vec();
-    Some((status, body))
-  }
-
-  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-  async fn health_returns_ok_shape() {
-    let (addr, shutdown, _status, handle) = spawn_proxy_on_ephemeral_port().await;
-    let mut sock = tokio::net::TcpStream::connect(addr)
-      .await
-      .expect("connect to proxy");
-    let host = addr.to_string();
-    let (status, body) = http_get_keepalive(&mut sock, &host, "/health").await;
-    assert_eq!(status, 200, "health returns 200");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["status"], "ok");
-    assert!(parsed["models_loaded"].is_u64(), "models_loaded shape");
-    assert!(
-      parsed["models_discovered"].is_u64(),
-      "models_discovered shape"
-    );
-    shutdown_proxy(shutdown, handle).await;
-  }
-
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn chat_completions_without_model_field_returns_400() {
     // A body without `model` short-circuits at the
@@ -695,23 +638,6 @@ mod tests {
   }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-  async fn keep_alive_serves_two_health_requests_on_one_connection() {
-    let (addr, shutdown, _status, handle) = spawn_proxy_on_ephemeral_port().await;
-    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    let host = addr.to_string();
-    let (s1, b1) = http_get_keepalive(&mut sock, &host, "/health").await;
-    assert_eq!(s1, 200, "first request status");
-    let p1: serde_json::Value = serde_json::from_slice(&b1).expect("json");
-    assert_eq!(p1["status"], "ok");
-    // Second GET reuses the same TCP socket.
-    let (s2, b2) = http_get_keepalive(&mut sock, &host, "/health").await;
-    assert_eq!(s2, 200, "second request status (keep-alive smoke)");
-    let p2: serde_json::Value = serde_json::from_slice(&b2).expect("json");
-    assert_eq!(p2["status"], "ok");
-    shutdown_proxy(shutdown, handle).await;
-  }
-
-  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn bind_failure_records_port_in_use() {
     // First listener camps on a real port.
     let camp = tokio::net::TcpListener::bind(loopback_addr(0))
@@ -724,7 +650,7 @@ mod tests {
     // an adjacent free port and turn the assertion green for the
     // wrong reason.
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context(&ctx, false, true);
+    let state = ProxyState::from_context(&ctx, true);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     serve_with_options(
@@ -758,7 +684,7 @@ mod tests {
       .expect("camp bind");
     let camp_addr = camp.local_addr().expect("camp addr");
     let ctx = MethodContext::new(ShutdownToken::new());
-    let state = ProxyState::from_context(&ctx, false, true);
+    let state = ProxyState::from_context(&ctx, true);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
     // Run the listener under a shutdown so the test can clean up; the

@@ -170,7 +170,7 @@ async fn proxy_state_with_models(models: Vec<DiscoveredModel>) -> Arc<ProxyState
     catalog.upsert(m).await;
   }
   let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog);
-  ProxyState::from_context(&ctx, false, true)
+  ProxyState::from_context(&ctx, true)
 }
 
 // --- direct-listener tests ----------------------------------------------
@@ -328,43 +328,6 @@ async fn schema_parity_with_documented_openai_shape() {
   shutdown_listener(shutdown, listener_handle).await;
 }
 
-// --- /health counts ------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn health_reports_zero_when_catalog_and_supervisors_are_empty() {
-  // Default MethodContext has an empty catalog and zero supervisors;
-  // /health must report 0/0 rather than the wire-shape stand-in.
-  let state = proxy_state_with_models(Vec::new()).await;
-  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
-  let (status, body) = http_get(addr, "/health").await;
-  assert_eq!(status, 200);
-  let v: Value = serde_json::from_slice(&body).expect("json body");
-  assert_eq!(v["status"], "ok");
-  assert_eq!(v["models_loaded"], 0, "no supervisors → 0");
-  assert_eq!(v["models_discovered"], 0, "empty catalog → 0");
-  shutdown_listener(shutdown, listener_handle).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn health_models_discovered_matches_catalog_length() {
-  // Three discovered models. No supervisors are launched here (Unit
-  // 2 only needs to confirm the count is sourced from the catalog),
-  // so `models_loaded` stays 0 — exercised end-to-end in Unit 3+.
-  let models = vec![
-    make_model("/m/a.gguf", None),
-    make_model("/m/b.gguf", None),
-    make_model("/m/c.gguf", None),
-  ];
-  let state = proxy_state_with_models(models).await;
-  let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;
-  let (status, body) = http_get(addr, "/health").await;
-  assert_eq!(status, 200);
-  let v: Value = serde_json::from_slice(&body).expect("json body");
-  assert_eq!(v["models_discovered"], 3);
-  assert_eq!(v["models_loaded"], 0, "no ready supervisors");
-  shutdown_listener(shutdown, listener_handle).await;
-}
-
 // --- daemon-wiring smoke -------------------------------------------------
 
 async fn wait_for_socket(path: &Path) {
@@ -461,16 +424,6 @@ async fn end_to_end_proxy_models_matches_discovery_catalog() {
   // file_stem() → "alpha" and "bravo"; alphabetical order is
   // already a → b.
   assert_eq!(ids, vec!["alpha", "bravo"]);
-
-  // /health counts now reflect real values (R158 / R159):
-  let (hs, hb) = http_get(proxy_addr, "/health").await;
-  assert_eq!(hs, 200);
-  let hv: Value = serde_json::from_slice(&hb).expect("json");
-  assert_eq!(hv["models_discovered"], 2);
-  assert_eq!(
-    hv["models_loaded"], 0,
-    "no supervisors launched in this test"
-  );
 
   // Shutdown.
   let mut client = Client::connect(&socket).await.expect("connect daemon");

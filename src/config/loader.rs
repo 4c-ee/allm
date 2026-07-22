@@ -1870,40 +1870,6 @@ proxy:
   }
 
   #[test]
-  fn lemonade_is_off_by_default_and_parses_when_enabled() {
-    // Missing `backend.lemonade:` section → opt-in default (off), no warning.
-    let dir = temp_test_dir("lemonade-default");
-    let path = dir.join("config.yaml");
-    fs::write(&path, "{}\n").expect("write failed");
-    let loaded = load_config_from_path(&path);
-    assert!(loaded.warning.is_none());
-    assert_eq!(
-      loaded.config.backend.lemonade.enabled, None,
-      "lemonade `enabled` defaults to unset (on-when-found intent, like ds4)"
-    );
-    assert!(loaded.config.backend.lemonade.servers.is_empty());
-    assert_eq!(loaded.config.backend.lemonade.port, 13305);
-    fs::remove_dir_all(dir).expect("temp test dir should be removed");
-
-    // Explicit enable + user-provided binary path round-trips.
-    let on_dir = temp_test_dir("lemonade-on");
-    let on_path = on_dir.join("config.yaml");
-    fs::write(
-      &on_path,
-      "backend:\n  lemonade:\n    enabled: true\n    servers:\n      - binary: /opt/lemonade/lemond\n",
-    )
-    .expect("write failed");
-    let on_loaded = load_config_from_path(&on_path);
-    assert!(on_loaded.warning.is_none());
-    assert_eq!(on_loaded.config.backend.lemonade.enabled, Some(true));
-    assert_eq!(
-      on_loaded.config.backend.lemonade.primary_binary(),
-      Some(std::path::Path::new("/opt/lemonade/lemond"))
-    );
-    fs::remove_dir_all(on_dir).expect("temp test dir should be removed");
-  }
-
-  #[test]
   fn proxy_config_unknown_key_is_rejected() {
     let dir = temp_test_dir("proxy-unknown");
     let path = dir.join("config.yaml");
@@ -1945,10 +1911,6 @@ proxy:
     // that an empty doc parsed): defaults the example pins explicitly.
     assert!(loaded.config.proxy.enabled);
     assert!(!loaded.config.proxy.insecure_no_auth);
-    // The example pins `backend.lemonade.enabled: true` explicitly (active key,
-    // per the "example keys are not commented out" convention).
-    assert_eq!(loaded.config.backend.lemonade.enabled, Some(true));
-    assert_eq!(loaded.config.backend.lemonade.port, 13305);
   }
 
   #[test]
@@ -1972,7 +1934,7 @@ proxy:
   fn effective_api_key_resolves_env_over_config_blank_as_none() {
     // Shares the crate env mutex with the daemon's
     // LLAMASTASH_PROXY_API_KEY tests so they don't race on the var.
-    let _env = crate::cli::test_lock::serialize();
+    let _env = crate::test_lock::serialize();
     let saved = std::env::var_os("LLAMASTASH_PROXY_API_KEY");
     std::env::remove_var("LLAMASTASH_PROXY_API_KEY");
 

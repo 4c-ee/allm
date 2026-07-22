@@ -201,7 +201,7 @@ mod tests {
     // This is the regression test for the discovery / download
     // asymmetry: before the fix, downloads landed at the override but
     // discovery scanned only `~/.cache/huggingface/hub`.
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let saved_hub = std::env::var_os("HF_HUB_CACHE");
     let saved_home = std::env::var_os("HF_HOME");
 
@@ -276,7 +276,7 @@ mod tests {
     // Linux the official systemd installer drops models under
     // `/usr/share/ollama/.ollama/models`, which is reachable without
     // any home, so that path surfaces unconditionally on Linux.
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let saved: Vec<(&str, _)> = [
       "HF_HUB_CACHE",
       "HUGGINGFACE_HUB_CACHE",
@@ -326,7 +326,7 @@ mod tests {
     // (rare but possible in sandboxes) doesn't lose visibility. LM Studio
     // is skipped — it has no env override and its defaults need home.
     // On Linux the Ollama systemd path is appended unconditionally.
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let saved_hf = std::env::var_os("HF_HUB_CACHE");
     let saved_hf_hub = std::env::var_os("HUGGINGFACE_HUB_CACHE");
     let saved_hf_home = std::env::var_os("HF_HOME");

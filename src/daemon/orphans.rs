@@ -270,17 +270,6 @@ pub(crate) async fn models_endpoint_matches(port: u16, expected: &Path, timeout:
   }
 }
 
-/// Compare two model paths for adoption, tolerant of canonicalisation: try a
-/// canonical compare first (resolves symlinks / `..`), fall back to a direct
-/// path compare when either can't be canonicalised (file already gone). Shared
-/// by a backend's `adoption_matches` argv `-m` cross-check.
-pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
-  match (a.canonicalize(), b.canonicalize()) {
-    (Ok(ca), Ok(cb)) => ca == cb,
-    _ => a == b,
-  }
-}
-
 /// GET `/v1/models` via `reqwest` — the same client the right-pane
 /// chat tab uses, so the orphan probe doesn't carry its own HTTP/1.1
 /// framing. Capped at 32 KiB so a misbehaving peer can't balloon our
@@ -491,26 +480,6 @@ mod tests {
       }
     });
     (task, port)
-  }
-
-  #[test]
-  fn paths_equal_matches_same_file_and_rejects_different() {
-    // The ds4 adoption argv `-m` cross-check: two spellings of the same file
-    // match; a different basename does not (per-file PID-reuse discrimination).
-    let dir = crate::test_support::unique_temp_dir("orphans-paths", "eq");
-    let a = dir.join("m.gguf");
-    std::fs::write(&a, b"x").unwrap();
-    assert!(paths_equal(&a, &a));
-    // A `./`-prefixed spelling canonicalizes to the same file.
-    let dotted = dir.join(".").join("m.gguf");
-    assert!(paths_equal(&dotted, &a), "canonicalization collapses ./");
-    // A different file in the same dir must not match.
-    let b = dir.join("other.gguf");
-    std::fs::write(&b, b"y").unwrap();
-    assert!(!paths_equal(&a, &b));
-    // A non-existent path falls back to a direct compare (unequal).
-    assert!(!paths_equal(&dir.join("gone.gguf"), &a));
-    std::fs::remove_dir_all(&dir).ok();
   }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

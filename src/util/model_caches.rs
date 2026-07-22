@@ -167,7 +167,7 @@ mod tests {
 
   #[test]
   fn huggingface_priority_hf_hub_cache_first() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(HF_KEYS);
 
     std::env::set_var("HF_HUB_CACHE", "/explicit/hub");
@@ -190,7 +190,7 @@ mod tests {
 
   #[test]
   fn huggingface_deprecated_alias_picks_up_when_modern_unset() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(HF_KEYS);
 
     std::env::set_var("HUGGINGFACE_HUB_CACHE", "/legacy/hub");
@@ -200,7 +200,7 @@ mod tests {
 
   #[test]
   fn huggingface_xdg_cache_home_used_before_home_default() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(HF_KEYS);
 
     std::env::set_var("XDG_CACHE_HOME", "/custom/xdg");
@@ -211,7 +211,7 @@ mod tests {
 
   #[test]
   fn huggingface_empty_env_vars_treated_as_unset() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(HF_KEYS);
 
     std::env::set_var("HF_HUB_CACHE", "");
@@ -226,7 +226,7 @@ mod tests {
 
   #[test]
   fn huggingface_no_home_returns_env_only_or_empty() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(HF_KEYS);
 
     assert!(huggingface_hub_dirs(None).is_empty());
@@ -240,7 +240,7 @@ mod tests {
 
   #[test]
   fn huggingface_default_only_when_no_env_set() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(HF_KEYS);
 
     let paths = huggingface_hub_dirs(Some(Path::new("/home/user")));
@@ -265,7 +265,7 @@ mod tests {
 
   #[test]
   fn ollama_env_var_takes_priority_home_default_appears() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(&["OLLAMA_MODELS"]);
 
     std::env::set_var("OLLAMA_MODELS", "/mnt/ollama");
@@ -280,7 +280,7 @@ mod tests {
 
   #[test]
   fn ollama_empty_env_falls_through() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(&["OLLAMA_MODELS"]);
 
     std::env::set_var("OLLAMA_MODELS", "");
@@ -291,7 +291,7 @@ mod tests {
 
   #[test]
   fn ollama_no_home_with_env_returns_env_plus_system_path() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(&["OLLAMA_MODELS"]);
 
     std::env::set_var("OLLAMA_MODELS", "/mnt/ollama");
@@ -303,7 +303,7 @@ mod tests {
   #[test]
   #[cfg(target_os = "linux")]
   fn ollama_linux_includes_system_install_path() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(&["OLLAMA_MODELS"]);
 
     let paths = ollama_models_dirs(Some(Path::new("/home/user")));
@@ -316,7 +316,7 @@ mod tests {
   #[test]
   #[cfg(not(target_os = "linux"))]
   fn ollama_non_linux_omits_system_install_path() {
-    let _lock = crate::cli::test_lock::serialize();
+    let _lock = crate::test_lock::serialize();
     let _guard = EnvSnapshot::take(&["OLLAMA_MODELS"]);
 
     let paths = ollama_models_dirs(Some(Path::new("/home/user")));

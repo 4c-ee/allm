@@ -184,7 +184,7 @@ async fn build_state_with_fallback(
   let ctx = MethodContext::with_catalog(token, catalog)
     .with_supervisors(registry)
     .with_launch_env(env);
-  let state = ProxyState::from_context(&ctx, false, fallback_enabled);
+  let state = ProxyState::from_context(&ctx, fallback_enabled);
   (state, ctx)
 }
 

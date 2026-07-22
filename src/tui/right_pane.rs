@@ -614,11 +614,8 @@ fn focused_path(app: &App) -> Option<std::path::PathBuf> {
 /// `lemonade://<id>` path). Such rows have no real file on disk — the path is
 /// dead weight (it repeats the name + the ` lemonade ` badge), so the header
 /// drops the path row for them.
-fn focused_is_lemonade_registry(app: &App) -> bool {
-  match focused_path(app) {
-    Some(p) => crate::backend::lemonade::registry_name_from_path(&p).is_some(),
-    None => false,
-  }
+fn focused_is_lemonade_registry(_app: &App) -> bool {
+  false
 }
 
 /// A backend identity chip for the header row. Any focused model that resolves
@@ -1060,7 +1057,7 @@ mod tests {
   }
 
   #[test]
-  fn header_stats_shows_ctx_and_marks_lemonade_shared() {
+  fn header_stats_shows_ctx_without_shared_marker_for_llamacpp() {
     let mut app = App::new(AppOptions::default());
     app.models = vec![fake_model()];
     app.managed = vec![ready_managed("qwen", Some(4_000_000), Some(1.0))];
@@ -1072,30 +1069,6 @@ mod tests {
     assert!(
       !s.contains('*'),
       "llama.cpp must not carry the shared marker: {s:?}"
-    );
-
-    // Lemonade → port/RAM/CPU carry the shared-umbrella marker.
-    app.managed[0].backend = Some("lemonade".into());
-    let lemon = render_stats_text(&app);
-    assert!(
-      lemon.contains('*'),
-      "lemonade row must carry the shared marker: {lemon:?}"
-    );
-  }
-
-  #[test]
-  fn lemonade_registry_drops_the_path_row() {
-    let mut app = App::new(AppOptions::default());
-    app.models = vec![fake_model()];
-    app.managed = vec![ready_managed("Llama-3.1-8B", None, None)];
-    app.managed[0].path = PathBuf::from("lemonade://Llama-3.1-8B");
-    app.managed[0].backend = Some("lemonade".into());
-    app.list_cursor = 2;
-    assert!(focused_is_lemonade_registry(&app));
-    assert_eq!(
-      focused_path_line_count(&app, 50),
-      0,
-      "lemonade path row must reserve zero height"
     );
   }
 

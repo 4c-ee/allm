@@ -43,9 +43,7 @@
 //! file-less backend-registry model rides the same persisted maps as GGUF
 //! rows — reusable by any future backend.
 
-pub mod ds4;
 pub mod identity;
-pub mod lemonade;
 pub mod llama_cpp;
 pub mod server;
 
@@ -67,9 +65,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::backend::ds4::Ds4Backend;
 use crate::backend::identity::ModelIdentity;
-use crate::backend::lemonade::LemonadeBackend;
 use crate::backend::llama_cpp::LlamaCppBackend;
 use crate::daemon::context::MethodContext;
 use crate::daemon::probe::ProbeOptions;
@@ -85,10 +81,6 @@ pub enum Lifecycle {
   /// One supervised child process per model; llamastash owns the full
   /// lifecycle (spawn, probe, evict-by-kill). llama.cpp.
   ProcessPerModel,
-  /// One long-lived supervised umbrella process; per-model start/stop
-  /// /list delegated to the backend's own API. Used by managed-multiplexer
-  /// backends (e.g. an NPU server).
-  ManagedMultiplexer,
 }
 
 impl Lifecycle {
@@ -96,7 +88,6 @@ impl Lifecycle {
   pub fn label(self) -> &'static str {
     match self {
       Lifecycle::ProcessPerModel => "process_per_model",
-      Lifecycle::ManagedMultiplexer => "managed_multiplexer",
     }
   }
 }
@@ -214,7 +205,6 @@ pub enum Accelerator {
   Rocm,
   Vulkan,
   Metal,
-  Npu,
 }
 
 impl Accelerator {
@@ -226,7 +216,6 @@ impl Accelerator {
       Accelerator::Rocm => "rocm",
       Accelerator::Vulkan => "vulkan",
       Accelerator::Metal => "metal",
-      Accelerator::Npu => "npu",
     }
   }
 }
@@ -606,22 +595,6 @@ pub trait Backend {
     Vec::new()
   }
 
-  /// The `doctor` advisories this backend contributes, given the resolved
-  /// [`Config`](crate::config::Config). Default: none. `doctor` collects across
-  /// [`Backends::all`] so its check flow names no backend; each finding carries
-  /// a stable string id (kept additive, so `schema_version` never bumps for a
-  /// new backend). A backend with host-specific diagnostics (ds4's "compatible
-  /// model present but the engine is unavailable") overrides this and builds its
-  /// findings via [`Finding::from_parts`](crate::init::doctor::Finding::from_parts).
-  /// `config`-only (not `ctx`) because `doctor` runs CLI-side with no
-  /// [`MethodContext`]; a backend reads its own sub-config + does its own scan.
-  async fn doctor_findings(
-    &self,
-    _config: &crate::config::Config,
-  ) -> Vec<crate::init::doctor::Finding> {
-    Vec::new()
-  }
-
   /// The [`LaunchId`](crate::daemon::registry::LaunchId) of this backend's
   /// long-lived infrastructure process (a managed-multiplexer umbrella), or
   /// `None` for a process-per-model backend. Generic walkers that iterate
@@ -799,14 +772,11 @@ pub trait Backend {
 /// All backend configuration, grouped under the `backend:` map in
 /// `config.yaml`. Each backend owns its own typed config struct in its own
 /// module; this is the single aggregation point the top-level [`crate::config::Config`]
-/// carries. llama.cpp is the always-on default backend, so it has no `enabled`
-/// field — only the optional engines do.
+/// carries. llama.cpp is the always-on default backend.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "snake_case")]
 pub struct BackendConfig {
   pub llamacpp: crate::backend::llama_cpp::LlamaCppConfig,
-  pub lemonade: crate::backend::lemonade::LemonadeConfig,
-  pub ds4: crate::backend::ds4::Ds4Config,
 }
 
 /// Zero-cost, exhaustive dispatch over the available backends.
@@ -819,10 +789,6 @@ pub struct BackendConfig {
 pub enum Backends {
   /// Direct, zero-overhead llama.cpp (process-per-model).
   LlamaCpp(LlamaCppBackend),
-  /// Lemonade (`lemond`) managed-multiplexer — one umbrella, many models.
-  Lemonade(LemonadeBackend),
-  /// ds4 (DwarfStar) — direct process-per-model for DeepSeek V4 GGUFs.
-  Ds4(Ds4Backend),
 }
 
 /// Forward a [`Backend`] call to whichever [`Backends`] variant is active.
@@ -837,8 +803,6 @@ macro_rules! for_each_backend {
   ($self:expr, $b:ident => $body:expr) => {
     match $self {
       Backends::LlamaCpp($b) => $body,
-      Backends::Lemonade($b) => $body,
-      Backends::Ds4($b) => $body,
     }
   };
 }
@@ -852,11 +816,7 @@ impl Backends {
   /// this instead of hand-listing variants, so a new backend surfaces
   /// everywhere from one registration.
   pub fn all() -> Vec<Backends> {
-    vec![
-      Backends::LlamaCpp(LlamaCppBackend::new()),
-      Backends::Lemonade(LemonadeBackend::new()),
-      Backends::Ds4(Ds4Backend::new()),
-    ]
+    vec![Backends::LlamaCpp(LlamaCppBackend::new())]
   }
 }
 
@@ -1032,13 +992,6 @@ impl Backend for Backends {
     for_each_backend!(self, b => b.status_extra(ctx).await)
   }
 
-  async fn doctor_findings(
-    &self,
-    config: &crate::config::Config,
-  ) -> Vec<crate::init::doctor::Finding> {
-    for_each_backend!(self, b => b.doctor_findings(config).await)
-  }
-
   fn umbrella_launch_id(&self) -> Option<crate::daemon::registry::LaunchId> {
     for_each_backend!(self, b => b.umbrella_launch_id())
   }
@@ -1102,18 +1055,12 @@ impl Backend for Backends {
 
 /// Map a model's [`ModelIdentity`] to the backend that runs it.
 ///
-/// The identity-keyed rule (the **auto** half of R17): a GGUF identity binds to
-/// the direct llama.cpp backend; a backend-registry identity binds to the
-/// registry backend whose [`Backend::id`] matches (found generically over
-/// [`Backends::all`], so no backend is named here). An unknown registry id
-/// falls back to the safe direct path.
+/// The identity-keyed rule: GGUF identities bind to llama.cpp.
+/// Any backend-registry identity falls back to llama.cpp in this simplified version.
 pub fn backend_for_identity(identity: &ModelIdentity) -> Backends {
   match identity {
     ModelIdentity::Gguf(_) => Backends::LlamaCpp(LlamaCppBackend::new()),
-    ModelIdentity::Backend(id) => Backends::all()
-      .into_iter()
-      .find(|b| b.id() == id.backend)
-      .unwrap_or_else(|| Backends::LlamaCpp(LlamaCppBackend::new())),
+    ModelIdentity::Backend(_) => Backends::LlamaCpp(LlamaCppBackend::new()),
   }
 }
 
@@ -1202,11 +1149,9 @@ pub fn default_backend() -> Backends {
 /// Whether the backend with `id` is a managed multiplexer (its models are
 /// delegated to a shared umbrella, so they share the umbrella's port / RAM /
 /// CPU). Lets a client key on the lifecycle shape from just an id, without
-/// naming a backend. Unknown id → `false`.
-pub fn is_managed_multiplexer(id: &str) -> bool {
-  Backends::all()
-    .iter()
-    .any(|b| b.id() == id && b.lifecycle() == Lifecycle::ManagedMultiplexer)
+/// naming a backend. Always returns `false` in this simplified version.
+pub fn is_managed_multiplexer(_id: &str) -> bool {
+  false
 }
 
 /// The native-knob descriptors a backend (by id) declares, or an empty slice
@@ -1272,7 +1217,6 @@ pub fn resolve_backend_for_launch(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::backend::lemonade::LEMONADE_BACKEND_ID;
 
   #[test]
   fn capability_all_covers_every_knob_spec() {
@@ -1288,8 +1232,6 @@ mod tests {
 
   #[test]
   fn process_launch_spec_is_constructible_and_readable() {
-    // Proves the process-per-model shape is usable end-to-end as a
-    // value (the supervisor will consume exactly these fields).
     let spec = ProcessLaunchSpec {
       binary: PathBuf::from("/usr/bin/llama-server"),
       argv: vec![OsString::from("--port"), OsString::from("41100")],
@@ -1318,73 +1260,17 @@ mod tests {
   }
 
   #[test]
-  fn resolve_backend_honors_override_then_auto_rule() {
-    use crate::backend::identity::BackendModelId;
+  fn resolve_backend_auto_binds_gguf_to_llamacpp() {
     use crate::gguf::identity::compute;
-
     let gguf = ModelIdentity::Gguf(compute("/m/model.gguf", b"hdr"));
-    let lemon = ModelIdentity::Backend(BackendModelId {
-      backend: LEMONADE_BACKEND_ID.into(),
-      name: "Qwen2.5-7B-Instruct-GGUF".into(),
-    });
-    // A backend-registry identity for an *unknown* backend falls back to the
-    // safe direct path.
-    let unknown = ModelIdentity::Backend(BackendModelId {
-      backend: "made-up".into(),
-      name: "x".into(),
-    });
-
-    // Auto runs the R13 identity rule; GGUF + explicit llama.cpp both bind
-    // the direct backend; a Lemonade identity binds Lemonade.
-    assert_eq!(resolve_backend(&gguf, BackendChoice::Auto).id(), "llamacpp");
-    assert_eq!(
-      resolve_backend(&gguf, BackendChoice::Explicit("llamacpp".into())).id(),
-      "llamacpp"
-    );
-    assert_eq!(
-      resolve_backend(&lemon, BackendChoice::Auto).id(),
-      "lemonade"
-    );
-    assert_eq!(
-      resolve_backend(&unknown, BackendChoice::Auto).id(),
-      "llamacpp",
-      "no concrete backend for an unknown registry identity → safe direct fallback"
-    );
-
-    // An explicit override wins over the identity rule: force Lemonade
-    // even for a GGUF identity.
-    assert_eq!(
-      resolve_backend(&gguf, BackendChoice::Explicit("lemonade".into())).id(),
-      "lemonade"
-    );
-
-    // The default choice is Auto.
-    assert_eq!(BackendChoice::default(), BackendChoice::Auto);
-  }
-
-  #[test]
-  fn resolve_backend_auto_exposes_full_capability_set_for_gguf() {
-    use crate::gguf::identity::compute;
-    use crate::launch::flag_aliases::knob_specs;
-    let gguf = ModelIdentity::Gguf(compute("/m/anything.gguf", b"hdr"));
     let b = resolve_backend(&gguf, BackendChoice::Auto);
     assert_eq!(b.id(), "llamacpp");
     assert_eq!(b.lifecycle(), Lifecycle::ProcessPerModel);
-    // The selected backend exposes the full capability set (R6 data seam).
-    for spec in knob_specs() {
-      assert!(b.capabilities().supports(spec.field));
-    }
   }
 
   #[test]
-  fn llama_and_lemonade_declare_no_native_knobs() {
-    // The native-knob channel is empty for llama.cpp and Lemonade, so the
-    // picker + persistence stay byte-identical for them. ds4 is the first
-    // backend to override `native_knobs()`.
+  fn llama_cpp_declares_no_native_knobs() {
     assert!(Backends::LlamaCpp(LlamaCppBackend::new())
-      .native_knobs()
-      .is_empty());
-    assert!(Backends::Lemonade(LemonadeBackend::new())
       .native_knobs()
       .is_empty());
   }
@@ -1392,53 +1278,25 @@ mod tests {
   #[test]
   fn lifecycle_labels_are_stable() {
     assert_eq!(Lifecycle::ProcessPerModel.label(), "process_per_model");
-    assert_eq!(Lifecycle::ManagedMultiplexer.label(), "managed_multiplexer");
   }
 
   #[test]
-  fn backend_for_identity_routes_by_shape() {
-    use crate::backend::identity::BackendModelId;
+  fn backend_for_identity_routes_gguf_to_llamacpp() {
     use crate::gguf::identity::compute;
-
-    // GGUF always binds to the direct llama.cpp backend.
     let gguf = ModelIdentity::Gguf(compute("/m/model.gguf", b"hdr"));
     assert_eq!(backend_for_identity(&gguf).id(), "llamacpp");
     assert_eq!(
       backend_for_identity(&gguf).lifecycle(),
       Lifecycle::ProcessPerModel
     );
-
-    // A Lemonade-registry identity binds the managed-multiplexer backend.
-    let lemon = ModelIdentity::Backend(BackendModelId {
-      backend: LEMONADE_BACKEND_ID.into(),
-      name: "Qwen2.5-7B-Instruct-GGUF".into(),
-    });
-    assert_eq!(backend_for_identity(&lemon).id(), "lemonade");
-    assert_eq!(
-      backend_for_identity(&lemon).lifecycle(),
-      Lifecycle::ManagedMultiplexer
-    );
-
-    // A backend-registry identity for an unknown backend falls back to the
-    // safe direct path.
-    let unknown = ModelIdentity::Backend(BackendModelId {
-      backend: "made-up".into(),
-      name: "x".into(),
-    });
-    assert_eq!(backend_for_identity(&unknown).id(), "llamacpp");
   }
 
   #[test]
-  fn backends_enum_forwards_to_each_variant() {
+  fn backends_enum_routes_llamacpp_to_spawn_process() {
     let llama = Backends::LlamaCpp(LlamaCppBackend::new());
     assert_eq!(llama.id(), "llamacpp");
     assert_eq!(llama.lifecycle(), Lifecycle::ProcessPerModel);
 
-    let lemon = Backends::Lemonade(LemonadeBackend::new());
-    assert_eq!(lemon.id(), "lemonade");
-    assert_eq!(lemon.lifecycle(), Lifecycle::ManagedMultiplexer);
-
-    // The dispatch enum routes prepare_launch to the process-per-model plan.
     use crate::launch::mode::LaunchMode;
     let p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
     assert!(matches!(
@@ -1453,117 +1311,27 @@ mod tests {
   }
 
   #[test]
-  fn delegate_to_manager_carries_umbrella_and_model() {
-    // The managed-multiplexer arm: an umbrella ProcessLaunchSpec (probed
-    // via a liveness endpoint) plus the model the umbrella should serve.
-    let umbrella = ProcessLaunchSpec {
-      binary: PathBuf::from("/opt/example/server"),
-      argv: vec![
-        OsString::from("--host"),
-        OsString::from("127.0.0.1"),
-        OsString::from("--port"),
-        OsString::from("13305"),
-      ],
-      env_remove: vec![],
-      readiness: Readiness::HttpPoll {
-        path: "/live".to_string(),
-        ready_status: 200,
-      },
-      probe: ProbeOptions::default(),
-    };
-    let plan = LaunchPlan::DelegateToManager(ManagerLaunchSpec {
-      umbrella,
-      model: ManagerModelRef {
-        name: "Qwen2.5-7B-Instruct-GGUF".to_string(),
-      },
-    });
-    match plan {
-      LaunchPlan::DelegateToManager(spec) => {
-        assert_eq!(spec.model.name, "Qwen2.5-7B-Instruct-GGUF");
-        assert!(matches!(
-          spec.umbrella.readiness,
-          Readiness::HttpPoll {
-            ready_status: 200,
-            ..
-          }
-        ));
-        // Readiness path is a probe target, not a launch arg.
-        assert!(!spec.umbrella.argv.iter().any(|a| a == "/live"));
-      }
-      LaunchPlan::SpawnProcess(_) => panic!("expected DelegateToManager"),
-    }
-  }
-
-  #[test]
-  fn all_registry_lists_every_backend_once() {
-    // The single enumeration point: every shipped backend, exactly once, with
-    // the ids the rest of the tree keys off. A new backend appears here by
-    // construction (one `all()` line), which is what makes it surface in
-    // `status` / `doctor` / `--backend` without editing those sites.
+  fn all_registry_lists_only_llamacpp() {
     let ids: Vec<&str> = Backends::all().iter().map(|b| b.id()).collect();
-    assert_eq!(ids, vec!["llamacpp", "lemonade", "ds4"]);
-    // Forwarding through the macro reaches each variant's real lifecycle.
+    assert_eq!(ids, vec!["llamacpp"]);
     let by_id: std::collections::BTreeMap<&str, Lifecycle> = Backends::all()
       .iter()
       .map(|b| (b.id(), b.lifecycle()))
       .collect();
     assert_eq!(by_id["llamacpp"], Lifecycle::ProcessPerModel);
-    assert_eq!(by_id["lemonade"], Lifecycle::ManagedMultiplexer);
-    assert_eq!(by_id["ds4"], Lifecycle::ProcessPerModel);
-  }
-
-  fn ds4_header() -> GgufHeader {
-    use crate::gguf::header::{GgufValue, TensorInfo};
-    use std::collections::HashMap;
-    let mut metadata = HashMap::new();
-    metadata.insert(
-      "general.architecture".to_string(),
-      GgufValue::String("deepseek4".to_string()),
-    );
-    GgufHeader {
-      version: 3,
-      tensor_count: 2,
-      metadata,
-      tensors: vec![
-        TensorInfo {
-          name: "blk.0.ffn_gate_exps.weight".to_string(),
-          dims: vec![4096, 4096],
-          ggml_type: 16, // IQ2_XXS — a routed-expert quant ds4 accepts
-        },
-        TensorInfo {
-          name: "token_embd.weight".to_string(),
-          dims: vec![4096, 4096],
-          ggml_type: 1, // F16
-        },
-      ],
-    }
   }
 
   #[test]
-  fn backends_forward_defaulted_methods_to_variants() {
-    // Regression guard: `Backends` must forward every *defaulted* trait method
-    // to the active variant, else it silently returns the trait default rather
-    // than the override. Two cheap sentinels: serves_mode (a variant overrides
-    // Embedding → false; the default is true) and auto_routes (drives routing,
-    // reached through routed_backend_for).
-    let ds4 = Backends::Ds4(Ds4Backend::new());
-    assert!(
-      !ds4.serves_mode(LaunchMode::Embedding),
-      "Backends must forward serves_mode to the variant"
-    );
-    assert!(ds4.serves_mode(LaunchMode::Chat));
-    assert!(Backends::LlamaCpp(LlamaCppBackend::new()).serves_mode(LaunchMode::Embedding));
+  fn llama_cpp_serves_all_modes() {
+    use crate::launch::mode::LaunchMode;
+    let llama = Backends::LlamaCpp(LlamaCppBackend::new());
+    assert!(llama.serves_mode(LaunchMode::Chat));
+    assert!(llama.serves_mode(LaunchMode::Embedding));
+    assert!(llama.serves_mode(LaunchMode::Rerank));
+  }
 
-    // routed_backend_for exercises Backends::auto_routes forwarding end to end:
-    // a compatible header resolves to the claiming backend's id.
-    let h = ds4_header();
-    assert!(
-      ds4.auto_routes(&h),
-      "Backends must forward auto_routes to the variant"
-    );
-    assert_eq!(routed_backend_for(&h), Some("ds4".to_string()));
-
-    // A plain header claims no special routing → falls back to identity.
+  #[test]
+  fn llama_cpp_does_not_auto_route() {
     use crate::gguf::header::GgufValue;
     use std::collections::HashMap;
     let mut m = HashMap::new();
@@ -1571,12 +1339,13 @@ mod tests {
       "general.architecture".to_string(),
       GgufValue::String("llama".to_string()),
     );
-    let plain = GgufHeader {
+    let header = GgufHeader {
       version: 3,
       tensor_count: 0,
       metadata: m,
       tensors: vec![],
     };
-    assert_eq!(routed_backend_for(&plain), None);
+    assert!(!Backends::LlamaCpp(LlamaCppBackend::new()).auto_routes(&header));
+    assert_eq!(routed_backend_for(&header), None);
   }
 }

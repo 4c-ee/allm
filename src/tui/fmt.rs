@@ -123,23 +123,6 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
   }
 }
 
-/// Truncate `s` to `max` **characters**, replacing the dropped tail
-/// with a single `…`. Char-count based (not display width) — used by
-/// the fixed-column HF picker rows where every glyph is one cell.
-/// Returns the original string when it already fits.
-pub(crate) fn truncate_end(s: &str, max: usize) -> String {
-  if s.chars().count() <= max {
-    return s.to_string();
-  }
-  let ellipsis = crate::tui::glyphs::active().ellipsis();
-  // Reserve room for the ellipsis width so the result still fits `max`
-  // cells; the ASCII ellipsis (`...`) is three cells, not one.
-  let ell_w = ellipsis.chars().count();
-  let mut out: String = s.chars().take(max.saturating_sub(ell_w)).collect();
-  out.push_str(ellipsis);
-  out
-}
-
 /// Truncate `s` to fit `budget` terminal columns from the **left**,
 /// prepending `…/` so the trailing component (the binary name, the
 /// launch id) stays visible. Returns the original string unmodified
@@ -435,19 +418,6 @@ mod tests {
   #[test]
   fn format_bytes_pair_falls_back_to_bytes_for_tiny_totals() {
     assert_eq!(format_bytes_pair(0, 512), "0.0/512B");
-  }
-
-  #[test]
-  fn truncate_end_inserts_ellipsis_for_long_strings() {
-    let out = truncate_end("supercalifragilisticexpialidocious", 10);
-    assert_eq!(out.chars().count(), 10);
-    assert!(out.ends_with('…'));
-  }
-
-  #[test]
-  fn truncate_end_leaves_short_strings_unchanged() {
-    assert_eq!(truncate_end("ok", 10), "ok");
-    assert_eq!(truncate_end("", 10), "");
   }
 
   #[test]

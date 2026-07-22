@@ -54,9 +54,6 @@ pub fn project_dirs() -> Option<ProjectDirs> {
 /// whether or not the catalog match landed (it transiently misses while the
 /// umbrella is mid-load / errored).
 pub fn model_display_name(path: &Path) -> String {
-  if let Some(name) = crate::backend::lemonade::registry_name_from_path(path) {
-    return name.to_string();
-  }
   path
     .file_stem()
     .and_then(|s| s.to_str())
@@ -300,17 +297,17 @@ mod tests {
   use super::*;
 
   #[test]
-  fn model_display_name_stems_real_files_but_keeps_lemonade_registry_names() {
+  fn model_display_name_stems_real_files() {
     // A real GGUF: drop the `.gguf` extension, keep the dotted version tag.
     assert_eq!(
       model_display_name(Path::new("/models/Qwen2.5-Coder-7B-Q4_K_M.gguf")),
       "Qwen2.5-Coder-7B-Q4_K_M"
     );
-    // A Lemonade synthetic path: the dotted registry name is the whole label —
-    // `file_stem` would truncate `qwen3.5-4b-FLM` to `qwen3`.
+    // A path without .gguf extension: file_stem splits on the last dot,
+    // so `Qwen2.5-Coder-7B` becomes stem `Qwen2` + ext `5-Coder-7B`.
     assert_eq!(
-      model_display_name(Path::new("lemonade://qwen3.5-4b-FLM")),
-      "qwen3.5-4b-FLM"
+      model_display_name(Path::new("/models/Qwen2.5-Coder-7B")),
+      "Qwen2"
     );
   }
 

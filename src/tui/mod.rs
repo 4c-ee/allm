@@ -17,8 +17,6 @@ pub mod fmt;
 pub mod glyphs;
 pub mod help_bar;
 pub mod help_overlay;
-pub mod hf_dialog;
-pub mod hf_pull;
 pub mod hint_picker;
 pub mod host_stats_pane;
 pub mod info_pane;

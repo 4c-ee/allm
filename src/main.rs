@@ -1,39 +1,33 @@
 use anyhow::Result;
-use llamastash::{cli, config::loader, util::logging};
+use llamastash::{config::loader, daemon, theme, tui, util::logging};
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
-  // Translate `LLAMASTASH_OFFLINE=1`/`0`/empty into the `true`/unset clap's
-  // boolean env binding accepts, before parsing argv (see the fn doc).
-  cli::cli_args::normalize_offline_env();
-
-  // Parse by hand so clap's arg-rejection exit code matches our contract:
-  // a usage error exits USAGE (64), not clap's default 2. `--help` /
-  // `--version` are not errors — clap writes them to stdout and we exit 0.
-  // `parse_cli` also wires the `--no-colors` → `ColorChoice::Never` policy
-  // for styled help, which has to be decided before clap renders --help.
-  let cli = match cli::cli_args::parse_cli() {
-    Ok(cli) => cli,
-    Err(err) => {
-      let _ = err.print();
-      let code = if err.use_stderr() {
-        cli::exit_codes::USAGE
-      } else {
-        0
-      };
-      std::process::exit(code);
-    }
-  };
-
-  // Logger must be initialised BEFORE the panic hook — `log::error!` inside
-  // the hook is a silent no-op while no logger is registered, so a panic
-  // during CLI parsing/early startup would otherwise leave no trace in the
-  // log file. Both calls are best-effort: a missing log dir or an already
-  // initialised logger shouldn't block CLI use.
-  let _ = logging::init(cli.verbose);
+  let _ = logging::init(false);
   logging::install_panic_hook();
 
-  let config = loader::load_config(cli.config.clone());
-  let code = cli::dispatch(cli, config).await?;
-  std::process::exit(code);
+  let _config = loader::load_config(None);
+
+  let theme = theme::ThemeName::Macchiato;
+  let custom_palette = None;
+  let keymap = tui::keybindings::KeyMap::default();
+  let offline = false;
+  let mouse_focus = false;
+  let left_pane_ratios = vec![65, 100, 50, 35, 0];
+
+  let daemon_opts = daemon::DaemonOptions::from_defaults()?;
+  let socket_path = daemon_opts.state_dir.clone();
+
+  tui::events::launch(
+    theme,
+    custom_palette,
+    keymap,
+    offline,
+    mouse_focus,
+    left_pane_ratios,
+    &socket_path,
+    Some(daemon_opts),
+    None,
+  )
+  .await
 }

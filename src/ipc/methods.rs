@@ -876,14 +876,7 @@ struct FavoriteParams {
 /// (which matches favorites by `id.path`) resolves. A local GGUF resolves its
 /// real header identity. Shared by add + remove so both build the same key.
 fn resolve_favorite_id(model_path: &std::path::Path) -> Result<ModelId, ErrorObject> {
-  if crate::backend::lemonade::registry_name_from_path(model_path).is_some() {
-    Ok(ModelId {
-      path: model_path.to_path_buf(),
-      header_blake3: [0u8; 32],
-    })
-  } else {
-    resolve_model_id(model_path)
-  }
+  resolve_model_id(model_path)
 }
 
 async fn favorite_add_handler(
@@ -1167,37 +1160,6 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn favorite_add_accepts_a_lemonade_registry_path() {
-    // A fileless `lemonade://` path has no GGUF to hash — favoriting must still
-    // work (via the synthetic id), keyed on the path the catalog row uses so
-    // the TUI `★` resolves.
-    let c = ctx();
-    let resp = dispatch_request(
-      &c,
-      Request::new(
-        1,
-        "favorite_add",
-        Some(json!({"model_path": "lemonade://qwen3.5-4b-FLM"})),
-      ),
-    )
-    .await;
-    let body = resp
-      .result
-      .expect("lemonade favorite must succeed, not error");
-    assert_eq!(body["added"], json!(true));
-    assert_eq!(body["model_id"]["path"], "lemonade://qwen3.5-4b-FLM");
-    // favorite_list surfaces it with an `id.path` the TUI matches to the catalog.
-    let list = dispatch_request(&c, Request::new(2, "favorite_list", None))
-      .await
-      .result
-      .expect("favorite_list");
-    assert_eq!(
-      list["favorites"][0]["id"]["path"],
-      "lemonade://qwen3.5-4b-FLM"
-    );
-  }
-
-  #[tokio::test]
   async fn favorite_list_returns_empty_array_when_state_is_empty() {
     let c = ctx();
     let resp = dispatch_request(&c, Request::new(1, "favorite_list", None)).await;
@@ -1222,70 +1184,6 @@ mod tests {
       "error must name the rejected PID, got: {}",
       err.message
     );
-  }
-
-  /// A delegated-lemonade snapshot the way `start_delegated_lemonade`
-  /// persists one: Backend identity + the synthetic `lemonade://` path +
-  /// the registry-assigned `L#` handle.
-  fn lemonade_running_snapshot(
-    name: &str,
-    port: u16,
-    launch_id: &str,
-  ) -> crate::daemon::state_store::RunningSnapshot {
-    let path = PathBuf::from(format!("lemonade://{name}"));
-    let (id, resolved_backend) = crate::backend::synthetic_identity_for_path(&path)
-      .expect("a lemonade:// path mints a synthetic backend identity");
-    crate::daemon::state_store::RunningSnapshot {
-      id,
-      pid: 0,
-      port,
-      started_at: 0,
-      launch_id: Some(crate::daemon::registry::LaunchId(launch_id.to_string())),
-      resolved_backend,
-      params: LaunchParams::new(path, LaunchMode::Chat),
-      actuals: Default::default(),
-    }
-  }
-
-  #[tokio::test]
-  async fn stop_model_of_delegated_row_clears_snapshot_even_without_umbrella() {
-    // `stop_model` on a delegated row routes through `backend.stop`, whose
-    // delegated branch unloads from the umbrella and drops the snapshot. The
-    // umbrella is gone but the snapshot lingers (e.g. it crashed): the row must
-    // still be clearable — the unload is best-effort, the bookkeeping removal is
-    // the contract.
-    let c = ctx();
-    c.state
-      .mutate(|s| {
-        s.running
-          .push(lemonade_running_snapshot("Qwen-X", 13305, "L1"))
-      })
-      .await;
-    let resp = dispatch_request(
-      &c,
-      Request::new(1, "stop_model", Some(json!({"launch_id": "L1"}))),
-    )
-    .await;
-    let body = resp.result.expect("delegated stop must succeed");
-    assert_eq!(body["state"]["state"], json!("stopped"));
-    let still_there = c
-      .state
-      .snapshot()
-      .await
-      .running
-      .iter()
-      .any(|r| r.delegated_backend_id().is_some());
-    assert!(!still_there, "snapshot must be dropped");
-    // Second stop: the row is unknown now — the snapshot is gone, so it
-    // falls through to the supervisor path and errors like a bogus id.
-    let second = dispatch_request(
-      &c,
-      Request::new(2, "stop_model", Some(json!({"launch_id": "L1"}))),
-    )
-    .await;
-    let err = second.error.expect("double-stop must error");
-    assert_eq!(err.code, ErrorCode::InvalidParams.as_i32());
-    assert!(err.message.contains("L1"));
   }
 
   #[tokio::test]

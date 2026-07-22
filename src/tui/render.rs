@@ -165,9 +165,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
   // form lives inline in the right pane's Settings tab. The
   // `launch_picker` module still owns the form state struct, but no
   // dedicated overlay is painted.
-  if app.hf_dialog.is_some() {
-    super::hf_dialog::render(frame, area, app, &palette);
-  }
   if let Some(dialog) = app.save_preset_dialog.as_ref() {
     super::save_preset_dialog::render(frame, area, app, dialog, &palette);
   }
@@ -740,11 +737,8 @@ fn focused_row_is_running(app: &App, rows: &[list_pane::ListRow]) -> bool {
 fn focused_row_is_deletable(app: &App, rows: &[list_pane::ListRow]) -> bool {
   use crate::tui::status_icons::SurfaceState;
   match rows.get(app.list_cursor) {
-    Some(list_pane::ListRow::Model { state, path, .. }) => {
-      // Lemonade registry models have no local file to unlink — never deletable
-      // (mirrors `events::delete_refusal_reason`).
-      crate::backend::lemonade::registry_name_from_path(path).is_none()
-        && matches!(state, SurfaceState::NotLaunched | SurfaceState::Stopped)
+    Some(list_pane::ListRow::Model { state, .. }) => {
+      matches!(state, SurfaceState::NotLaunched | SurfaceState::Stopped)
     }
     _ => false,
   }
@@ -1284,16 +1278,6 @@ mod tests {
         "{s:?} must block delete"
       );
     }
-    // Lemonade registry models are never deletable, even when idle — there's no
-    // local file to unlink.
-    let mut lemon = model_row(SurfaceState::NotLaunched);
-    if let ListRow::Model { path, .. } = &mut lemon {
-      *path = PathBuf::from("lemonade://Llama-3.1-8B");
-    }
-    assert!(
-      !focused_row_is_deletable(&app, &[lemon]),
-      "Lemonade registry row must never be deletable"
-    );
   }
 
   fn spans_plain(spans: &[Span<'static>]) -> String {

@@ -851,14 +851,13 @@ mod tests {
   }
 
   #[test]
-  fn ds4_picker_groups_native_knobs_under_header_with_extras_last() {
+  fn llamacpp_picker_renders_with_no_native_knobs() {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::Terminal;
     let mut app = App::new(AppOptions::default());
-    let mut picker = LaunchPickerState::for_model("DeepSeek-V4-Flash");
-    picker.model_backend = crate::launch::params::BackendChoice::Explicit("ds4".into());
-    picker.native_descriptors = crate::backend::ds4::DS4_NATIVE_KNOBS;
+    let mut picker = LaunchPickerState::for_model("Llama-3.1-8B");
+    picker.model_backend = crate::launch::params::BackendChoice::Explicit("llamacpp".into());
     app.launch_picker = Some(picker);
     let palette = app.palette();
     let mut term = Terminal::new(TestBackend::new(60, 40)).unwrap();
@@ -874,68 +873,41 @@ mod tests {
       })
       .collect();
     let row_of = |needle: &str| rows.iter().position(|r| r.contains(needle));
-    // The native knobs carry their own separator group header, like the
-    // llama.cpp groups, and the free-text extras row is last of all.
-    let header = row_of("ds4 native").expect("ds4 native group header");
-    let ssd = row_of("SSD streaming").expect("a ds4 native knob row");
-    let extras = row_of("extras").expect("extras row");
-    assert!(header < ssd, "group header precedes its knobs");
-    assert!(ssd < extras, "extras comes after the ds4 native knobs");
+    let extras = row_of("extras");
+    assert!(
+      extras.is_some(),
+      "extras row always present for llamacpp picker"
+    );
   }
 
   #[test]
-  fn ds4_running_view_shows_native_knobs_not_llamacpp() {
+  fn llamacpp_running_view_shows_empty_native_knob_section() {
     use crate::tui::app::ManagedRow;
     use ratatui::text::Line;
     let app = App::new(AppOptions::default());
-    let path = PathBuf::from("/m/DeepSeek-V4-Flash.gguf");
-    // The running row carries the launch's live native knobs (from `status`)
-    // and the resolved `ds4` backend tag.
-    let mut backend_knobs = std::collections::BTreeMap::new();
-    backend_knobs.insert("ssd_streaming".into(), KnobValue::Set("true".into()));
-    backend_knobs.insert("power".into(), KnobValue::Set("80".into()));
+    let path = PathBuf::from("/m/llama.gguf");
+    let backend_knobs = std::collections::BTreeMap::new();
     let m = ManagedRow {
       launch_id: "L1".into(),
       path,
       port: 41100,
       backend_knobs,
-      backend: Some("ds4".into()),
+      backend: Some("llamacpp".into()),
       ..Default::default()
     };
     let palette = app.palette();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    push_native_readonly_rows(
-      &mut lines,
-      &m,
-      crate::backend::ds4::DS4_NATIVE_KNOBS,
-      Some(32768),
-      palette,
-      true,
-    );
+    push_native_readonly_rows(&mut lines, &m, &[], Some(32768), palette, true);
     let text: String = lines
       .iter()
       .flat_map(|l| l.spans.iter())
       .map(|s| s.content.as_ref())
       .collect::<Vec<_>>()
       .join(" ");
-    // The six ds4 native knobs render with their recorded values…
-    assert!(text.contains("ds4 native"), "{text}");
     assert!(
-      text.contains("SSD streaming") && text.contains("true"),
-      "{text}"
+      text.trim().is_empty() || text.contains("ctx"),
+      "llamacpp with no native knobs: {text}"
     );
-    assert!(
-      text.contains("GPU power %") && text.contains("80"),
-      "{text}"
-    );
-    assert!(
-      text.contains("CPU threads") && text.contains("inherited"),
-      "{text}"
-    );
-    // …the resolved ctx shows, but no llama.cpp typed knob leaks into it.
-    assert!(text.contains("32768"), "{text}");
-    assert!(!text.contains("n_gpu_layers"), "{text}");
-    assert!(!text.contains("flash_attn"), "{text}");
   }
 
   #[test]

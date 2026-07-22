@@ -249,15 +249,11 @@ fn vram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palet
 
 fn backend_row<'a>(host: &HostMetricsSnapshot, palette: &'a Palette) -> Line<'a> {
   use crate::daemon::host_metrics::GpuFlavor;
-  use crate::init::detection::gpu_vendor_display;
   let mid = crate::tui::glyphs::active().middot();
   let label = match host.flavor() {
-    // Name the vendor (AMD / NVIDIA / Apple) consistently with
-    // `status`, `doctor`, and `init` — not the metrics tool (NVML /
-    // ROCm), which conflated the vendor with the llama.cpp runtime.
     GpuFlavor::Nvidia | GpuFlavor::Amd => format!(
       "{} {mid} {}",
-      gpu_vendor_display(&host.gpu_backend),
+      host.gpu_backend.to_uppercase(),
       pluralize_gpu(host.gpu_device_count)
     ),
     GpuFlavor::AppleMetal => format!("Apple {mid} 1 GPU"),

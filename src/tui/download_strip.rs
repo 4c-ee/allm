@@ -20,7 +20,22 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::theme::Palette;
-use crate::tui::hf_dialog::PickerRow;
+
+#[derive(Debug, Clone)]
+pub enum PickerRow {
+  Single {
+    filename: String,
+    size_bytes: Option<u64>,
+  },
+}
+
+impl PickerRow {
+  pub fn size_bytes(&self) -> Option<u64> {
+    match self {
+      PickerRow::Single { size_bytes, .. } => *size_bytes,
+    }
+  }
+}
 
 /// How long an `Error` message lingers on the strip before the
 /// next queued pull is promoted. 5 seconds matches the

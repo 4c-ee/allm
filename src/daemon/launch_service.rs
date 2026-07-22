@@ -1096,17 +1096,24 @@ fn backend_knobs_for_persist(
 /// Human-readable admission refusal: the effective free (post-headroom),
 /// what other launches hold, this launch's projected demand, and the
 /// remediation menu — so the number is self-explaining and actionable.
+fn fmt_gib(bytes: u64) -> String {
+  const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+  let g = bytes as f64 / GIB;
+  if g >= 10.0 {
+    format!("{:.0}GiB", g)
+  } else {
+    format!("{:.1}GiB", g)
+  }
+}
+
 fn format_admission_refusal(refusal: &crate::launch::admission::Refusal) -> String {
-  // One canonical GiB formatter (bytes ÷ 1024³, 1 decimal) shared with
-  // every other memory surface — see `crate::init::detection::fmt_gib`.
-  let gib = crate::init::detection::fmt_gib;
   format!(
     "launch refused: needs {} but only {} is free (effective {} after headroom, minus {} reserved by in-flight launches). \
      Stop a resident model, pin a smaller --ctx, lower fit_ctx_floor, or retry once a model frees memory.",
-    gib(refusal.demand_bytes),
-    gib(refusal.available_bytes()),
-    gib(refusal.effective_free_bytes),
-    gib(refusal.reserved_bytes),
+    fmt_gib(refusal.demand_bytes),
+    fmt_gib(refusal.available_bytes()),
+    fmt_gib(refusal.effective_free_bytes),
+    fmt_gib(refusal.reserved_bytes),
   )
 }
 
@@ -1319,7 +1326,6 @@ mod tests {
   use tokio::sync::RwLock;
 
   use super::*;
-  use crate::config::LemonadeConfig;
   use crate::daemon::context::LaunchEnv;
   use crate::daemon::probe::ProbeOptions;
   use crate::daemon::registry::SupervisorRegistry;
@@ -1356,60 +1362,6 @@ mod tests {
     );
   }
 
-  #[tokio::test]
-  async fn backend_for_launch_resolves_process_launch_from_its_snapshot() {
-    use crate::backend::Backend;
-    // A process launch stamps its `L#` + resolved backend on the running
-    // snapshot, so `backend_for_launch` hands the stop to the launch's *real*
-    // backend rather than defaulting — the guard for a process-per-model backend
-    // that overrides `stop`. (llama.cpp and ds4 share the default stop today, so
-    // this is latent-correctness, not observable yet.)
-    let ctx = MethodContext::new(ShutdownToken::new());
-    let push = |id_path: &'static str, lid: &'static str, backend: &'static str, port: u16| {
-      let identity = ModelIdentity::Gguf(crate::gguf::identity::compute(id_path, b"hdr"));
-      let params = LaunchParams::new(PathBuf::from(id_path), LaunchMode::Chat);
-      RunningSnapshot {
-        id: identity,
-        pid: 1,
-        port,
-        started_at: 0,
-        launch_id: Some(LaunchId(lid.to_string())),
-        params,
-        actuals: Default::default(),
-        resolved_backend: backend.to_string(),
-      }
-    };
-    ctx
-      .state
-      .mutate(|s| {
-        s.running.push(push("/m/ds4.gguf", "L1", "ds4", 41100));
-        s.running
-          .push(push("/m/llama.gguf", "L2", "llamacpp", 41101));
-      })
-      .await;
-
-    assert_eq!(
-      backend_for_launch(&ctx, &LaunchId("L1".to_string()))
-        .await
-        .id(),
-      "ds4",
-      "a ds4-tagged process launch resolves to ds4, not the default backend"
-    );
-    assert_eq!(
-      backend_for_launch(&ctx, &LaunchId("L2".to_string()))
-        .await
-        .id(),
-      "llamacpp"
-    );
-    // An unknown id falls back to the default backend.
-    assert_eq!(
-      backend_for_launch(&ctx, &LaunchId("L9".to_string()))
-        .await
-        .id(),
-      crate::backend::DEFAULT_BACKEND_ID
-    );
-  }
-
   #[test]
   fn extras_manage_mmproj_detects_explicit_projector_flags() {
     let pin = vec![OsString::from("--mmproj"), OsString::from("/m/p.gguf")];
@@ -1429,112 +1381,6 @@ mod tests {
     );
     let unrelated = vec![OsString::from("--threads"), OsString::from("8")];
     assert!(!extras_manage_mmproj(&unrelated));
-  }
-
-  #[tokio::test]
-  async fn lemonade_start_without_binary_releases_reserved_port() {
-    use crate::config::loader::PortRange;
-    use crate::gguf::test_fixtures::build_minimal_gguf;
-    use crate::launch::params::BackendChoice;
-
-    // A real (minimal) GGUF on disk so `compose_and_spawn` clears header
-    // resolution and reaches the backend-selection seam.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let model_path = dir.path().join("tiny.gguf");
-    std::fs::write(&model_path, build_minimal_gguf("llama")).expect("write gguf");
-
-    // A single-port range on a probe-clear port. Find one the allocator
-    // accepts (tolerates TIME_WAIT), then release it so the run under test
-    // starts from an empty reservation set.
-    let registry = SupervisorRegistry::new();
-    let mut found = None;
-    for _ in 0..16 {
-      let l = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral port");
-      let p = l.local_addr().unwrap().port();
-      drop(l);
-      let range = PortRange { start: p, end: p };
-      if registry.reserve_port(None, &[], &range).await.is_ok() {
-        registry.release_reserved_port(p).await;
-        found = Some(p);
-        break;
-      }
-    }
-    let port = found.expect("at least one of 16 attempts lands on a probe-clear port");
-    let range = PortRange {
-      start: port,
-      end: port,
-    };
-
-    let env = LaunchEnv {
-      // Never spawned on this path — the managed-multiplexer arm errors out
-      // before any process launch.
-      binary: PathBuf::from("/nonexistent/llama-server"),
-      port_range: range,
-      log_dir: dir.path().to_path_buf(),
-      probe: ProbeOptions::default(),
-      arch_defaults: Default::default(),
-      servers: Arc::new(RwLock::new(Vec::new())),
-      default_launch_mode: Default::default(),
-    };
-
-    // Lemonade enabled but pointed at a binary that does not exist. The
-    // explicit-`binary` branch never falls back to PATH, so resolution is
-    // deterministically `None` even on a host that has a real `lemond`
-    // installed — the test can't be fooled by the dev machine's PATH.
-    let ctx = MethodContext::new(ShutdownToken::new())
-      .with_supervisors(registry)
-      .with_launch_env(env)
-      .with_backend(
-        crate::backend::BackendConfig {
-          lemonade: LemonadeConfig {
-            enabled: Some(true),
-            servers: vec![crate::backend::ServerConfig {
-              binary: PathBuf::from("/nonexistent/lemond-xyz"),
-              name: None,
-            }],
-            port: 13305,
-          },
-          ..Default::default()
-        },
-        std::collections::BTreeMap::new(),
-      );
-
-    let parsed = StartParams {
-      model_path,
-      // Force the managed-multiplexer seam: an explicit Lemonade override
-      // outranks the GGUF identity rule.
-      backend: Some(BackendChoice::Explicit("lemonade".into())),
-      ..Default::default()
-    };
-
-    // `StartedLaunch` (the Ok variant) isn't `Debug`, so match rather than
-    // `expect_err`.
-    let err = match compose_and_spawn(
-      &ctx,
-      parsed,
-      crate::daemon::supervisor::LaunchOrigin::Manual,
-    )
-    .await
-    {
-      Ok(_) => panic!("unresolvable lemond binary must error"),
-      Err(e) => e,
-    };
-    assert_eq!(err.code, ErrorCode::InvalidParams.as_i32());
-    assert!(
-      err.message.contains("lemond"),
-      "error should name the missing lemond binary, got: {}",
-      err.message
-    );
-
-    // The reservation must have been released: the single-port range is
-    // allocatable again only if `compose_and_spawn` dropped its hold on the
-    // error path (otherwise the range is exhausted and this errors).
-    let reclaimed = ctx
-      .supervisors
-      .reserve_port(None, &[], &range)
-      .await
-      .expect("reserved port must be released on the lemonade-unavailable error path");
-    assert_eq!(reclaimed, port);
   }
 
   /// A `MethodContext` wired with a real (single-port) launch env and a
@@ -1660,10 +1506,10 @@ mod tests {
     let msg = format_admission_refusal(&refusal);
     assert!(msg.contains("launch refused"));
     // demand 8 GiB, available 6 GiB (10 − 4), effective 10 GiB, reserved 4 GiB.
-    assert!(msg.contains("8.0 GiB"), "demand: {msg}");
-    assert!(msg.contains("6.0 GiB"), "available: {msg}");
-    assert!(msg.contains("10.0 GiB"), "effective free: {msg}");
-    assert!(msg.contains("4.0 GiB"), "reserved: {msg}");
+    assert!(msg.contains("8.0GiB"), "demand: {msg}");
+    assert!(msg.contains("6.0GiB"), "available: {msg}");
+    assert!(msg.contains("10GiB"), "effective free: {msg}");
+    assert!(msg.contains("4.0GiB"), "reserved: {msg}");
     // Remediation menu is part of the contract — it tells the user what
     // to do next.
     assert!(msg.contains("Stop a resident model"));

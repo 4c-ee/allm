@@ -119,7 +119,7 @@ async fn build_state(registry: SupervisorRegistry, log_dir: &Path) -> Arc<ProxyS
   let ctx = MethodContext::with_catalog(token, catalog)
     .with_supervisors(registry)
     .with_launch_env(env);
-  ProxyState::from_context(&ctx, false, true)
+  ProxyState::from_context(&ctx, true)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

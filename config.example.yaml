@@ -398,83 +398,10 @@ backend:
     # The reasoning toggle still forces `--jinja` on for launches it
     # applies to, regardless of this setting.
     #
-    # Sources — CLI: (none) · Env: (none, config-only).
+# Sources — CLI: (none) · Env: (none, config-only).
     jinja: true
 
-  # ── Lemonade (NPU / multi-engine backend) [EXPERIMENTAL] ──
-  #
-  # EXPERIMENTAL: behaviour and these keys may change. A second backend
-  # for engines llama.cpp can't reach — NPU inference on AMD Ryzen AI /
-  # XDNA, plus ROCm / ONNX / others — via the Lemonade (`lemond`) managed
-  # umbrella.
-  #
-  # Default-on when the `lemond` binary resolves (like ds4): if `lemond`
-  # is on PATH (or `binary` below points at it) the daemon runs Lemonade
-  # discovery + umbrella unless `enabled: false`. Zero footprint when the
-  # binary is absent. llamastash never installs `lemond` — you set it up
-  # yourself and point us at it (see docs/lemonade-setup.md).
-  lemonade:
-    # Force the backend on or off. Tri-state — leave unset (commented,
-    # the shown default) for auto: on whenever `lemond` resolves; `true`
-    # to force on; `false` to force off even when the binary is present.
-    #
-    # Sources — CLI: daemon start --lemonade (force on) ·
-    #           Env: LLAMASTASH_LEMONADE=1 (force on).
-    # (The flag and env only force on; `false` here still wins as an
-    # explicit off.)
-    enabled: true
-
-    # The user's `lemond` umbrella binary (single-entry `servers` list —
-    # Lemonade runs one umbrella). Leave empty to fall back to a `lemond`
-    # (or `lemonade`) found on `$PATH`.
-    #
-    # Sources — CLI: (none) · Env: (none). Config-only.
-    servers:
-      - binary: /opt/lemonade/lemond
-
-    # Loopback port the `lemond` umbrella binds and that discovery probes
-    # for the model list. Defaults to Lemonade's own default (13305).
-    #
-    # Sources — CLI: (none) · Env: (none). Config-only.
-    port: 13305
-
-  # ── ds4 (DwarfStar) — DeepSeek V4 backend [EXPERIMENTAL] ──
-  #
-  # EXPERIMENTAL: new and lightly road-tested; keys and defaults below may
-  # change between releases. llama.cpp stays the stable default and runs
-  # DeepSeek-V4 too, so ds4 is never required (set `enabled: false` or use
-  # `--backend llamacpp` to opt out).
-  #
-  # A third backend that runs antirez's `ds4-server` for the DeepSeek-V4
-  # Flash/PRO GGUFs. A ds4-compatible GGUF auto-routes to ds4 when the
-  # binary resolves; anything else (and any incompatible quant) stays on
-  # llama.cpp — ds4 is preferred, never required. You supply the binary:
-  # build ds4-server from https://github.com/antirez/ds4 and either put it
-  # on PATH or point `binary` at it. Zero footprint when it's absent.
-  # See docs/usage.md#ds4-backend.
-  ds4:
-    # Force the backend on or off. Tri-state — leave unset (commented,
-    # the shown default) for auto: on whenever `ds4-server` resolves;
-    # `true` to force on; `false` to force off even when present.
-    #
-    # Sources — CLI: daemon start --ds4 (force on) ·
-    #           Env: LLAMASTASH_DS4=1 (force on).
-    # (The flag and env only force on; `false` here still wins as an
-    # explicit off.)
-    enabled: true
-
-    # The `ds4-server` binary (single-entry `servers` list). Leave empty
-    # to fall back to a `ds4-server` found on `$PATH`. ds4-server has no
-    # `--list-devices` probe, so its compute type (Metal / CUDA / ROCm —
-    # ds4 has no Vulkan build) can't be auto-detected: the server id is the
-    # bare `ds4`. Set `name:` to label it — `name: rocm` → id `ds4-rocm`.
-    #
-    # Sources — CLI: (none) · Env: (none). Config-only.
-    servers:
-      - binary: /opt/ds4/ds4-server
-        name: rocm
-
-# ─── Keybindings ──────────────────────────────────────────────────
+  # ─── Keybindings ──────────────────────────────────────────────────
 #
 # Override the default keymap. Each entry maps an action name
 # (snake_case or kebab-case) to a key spec.

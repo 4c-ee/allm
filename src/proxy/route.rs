@@ -104,7 +104,9 @@ pub(crate) enum RouteDecision {
   /// registered/Ready — a clean 503 instead of routing a GGUF-shaped
   /// auto-start that would fail on the missing local file.
   BackendUnavailable {
+    #[allow(unused)]
     backend: String,
+    #[allow(unused)]
     requested_model: String,
   },
 }
@@ -340,68 +342,6 @@ async fn decide_umbrella_route(
 /// served by, or `None` for the default (llama.cpp) backend. Prefers the
 /// `resolved_backend` tag stamped on `last_params` — the launch's real backend,
 /// honoring an explicit `--backend` override — and falls back to the model's
-/// catalog routing verdict (when that backend is available) for a model with no
-/// tag yet (an adopted row, or the brief window before the recorder stamps).
-/// Used by `/ui` ([`Backend::serves_web_ui`]) and the mode guard
-/// ([`Backend::serves_mode`]) so both act on the true backend, not a
-/// prediction. Names no backend.
-pub(crate) async fn running_model_backend(
-  state: &Arc<ProxyState>,
-  id: &ModelId,
-) -> Option<crate::backend::Backends> {
-  use crate::backend::{Backend, Backends};
-  let ds_snap = state.ctx.state.snapshot().await;
-  if let Some(tag) = ds_snap
-    .last_params
-    .iter()
-    .find(|e| e.id.as_gguf().map(|g| g.path == id.path).unwrap_or(false))
-    .map(|e| e.resolved_backend.clone())
-  {
-    return Backends::all().into_iter().find(|b| b.id() == tag);
-  }
-  let cat = state.ctx.catalog.snapshot().await;
-  let rb = cat
-    .iter()
-    .find(|m| m.path == id.path)
-    .and_then(|m| m.default_backend().map(str::to_string))?;
-  Backends::all()
-    .into_iter()
-    .find(|b| b.id() == rb && b.available(&state.ctx))
-}
-
-/// The backend an `Auto` launch of `row` would land on — resolved through the
-/// same [`crate::backend::resolve_backend_for_launch`] seam the daemon's
-/// `start_model` uses, with the catalog mode hint as the launch mode. Used by
-/// the not-running arm of the mode guard: a compatible model launched for a
-/// `/v1/embeddings` request would auto-start in chat mode on its routed backend,
-/// then that backend's own error surfaces after the load — the guard refuses
-/// first (see [`Backend::serves_mode`]). Names no backend.
-pub(crate) async fn would_route_backend(
-  state: &Arc<ProxyState>,
-  row: &CatalogRow,
-) -> Option<crate::backend::Backends> {
-  let cat = state.ctx.catalog.snapshot().await;
-  let m = cat.iter().find(|m| same_path(&m.path, &row.path))?;
-  let launch_mode = match row.mode_hint.as_deref() {
-    Some("embedding") => crate::launch::mode::LaunchMode::Embedding,
-    Some("rerank") => crate::launch::mode::LaunchMode::Rerank,
-    _ => crate::launch::mode::LaunchMode::Chat,
-  };
-  // A GGUF identity: the fallback is the default backend, and the priority-
-  // ordered supported list drives the auto pick — exactly the daemon's rule.
-  let identity = crate::backend::identity::ModelIdentity::Gguf(crate::gguf::identity::ModelId {
-    path: m.path.clone(),
-    header_blake3: [0u8; 32],
-  });
-  Some(crate::backend::resolve_backend_for_launch(
-    &identity,
-    crate::launch::params::BackendChoice::Auto,
-    &m.supported_backends,
-    launch_mode,
-    &state.ctx,
-  ))
-}
-
 pub(crate) fn catalog_row_from_discovered(m: &DiscoveredModel) -> CatalogRow {
   let path = m.path.to_string_lossy().into_owned();
   let parent = m.parent.to_string_lossy().into_owned();
@@ -760,74 +700,6 @@ mod tests {
       row.mode_hint.as_deref(),
       Some("embedding"),
       "proxy auto-start needs embedding hint to add --embeddings"
-    );
-  }
-
-  #[tokio::test]
-  async fn mode_guard_refuses_embeddings_to_chat_only_backend() {
-    use crate::backend::Backend;
-    use crate::daemon::context::MethodContext;
-    use crate::daemon::shutdown::ShutdownToken;
-    use crate::discovery::ModelCatalog;
-    use crate::launch::mode::LaunchMode;
-
-    // A chat-only backend available on this host (ds4 is the real one; any
-    // existing file satisfies its binary resolver). The guard is generic —
-    // asserted via `serves_mode`, not by naming the backend.
-    let exe = std::env::current_exe().unwrap();
-    let ds4_cfg = crate::config::Ds4Config {
-      enabled: Some(true),
-      servers: vec![crate::backend::ServerConfig {
-        binary: exe,
-        name: None,
-      }],
-    };
-
-    // A chat model routed to that backend → auto-start lands on a backend that
-    // doesn't serve embeddings, so an embeddings/rerank request must be refused.
-    let mut chat = discovered_with_mode(ModeHint::Chat);
-    chat.path = std::path::PathBuf::from("/m/deepseek.gguf");
-    chat.supported_backends = vec![
-      crate::backend::ds4::DS4_BACKEND_ID.to_string(),
-      crate::backend::DEFAULT_BACKEND_ID.to_string(),
-    ];
-    let chat_row = catalog_row_from_discovered(&chat);
-
-    // A compatible-but-embedding-hint model routes to the default backend
-    // (which serves embeddings), so it must NOT be guarded.
-    let mut embed = discovered_with_mode(ModeHint::Embedding);
-    embed.path = std::path::PathBuf::from("/m/embed.gguf");
-    embed.supported_backends = vec![
-      crate::backend::ds4::DS4_BACKEND_ID.to_string(),
-      crate::backend::DEFAULT_BACKEND_ID.to_string(),
-    ];
-    let embed_row = catalog_row_from_discovered(&embed);
-
-    let catalog = ModelCatalog::new();
-    catalog.upsert(chat).await;
-    catalog.upsert(embed).await;
-    let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog).with_backend(
-      crate::backend::BackendConfig {
-        ds4: ds4_cfg,
-        ..Default::default()
-      },
-      std::collections::BTreeMap::new(),
-    );
-    let state = crate::proxy::state::ProxyState::from_context(&ctx, false, true);
-
-    let chat_backend = super::would_route_backend(&state, &chat_row)
-      .await
-      .expect("chat row resolves a backend");
-    assert!(
-      !chat_backend.serves_mode(LaunchMode::Embedding),
-      "compatible chat model auto-starts on a chat-only backend → embeddings guard fires"
-    );
-    let embed_backend = super::would_route_backend(&state, &embed_row)
-      .await
-      .expect("embed row resolves a backend");
-    assert!(
-      embed_backend.serves_mode(LaunchMode::Embedding),
-      "embedding-hint model routes to an embedding-capable backend → not guarded"
     );
   }
 
