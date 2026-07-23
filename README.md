@@ -48,25 +48,13 @@ and copy the binary from target/release/allm to your bin (usually `~/.local/bin`
 
 ## Configuration
 
-allm reads `$XDG_CONFIG_HOME/llamastash/config.yaml` on Linux (fallback `~/.config/llamastash/config.yaml`), `~/Library/Application Support/llamastash/config.yaml` on macOS, and `%APPDATA%\llamastash\config\config.yaml` on Windows. A fully-annotated sample lives at [`config.example.yaml`](config.example.yaml) — copy it to the path above and edit. Run `llamastash config` to open the active file in `$EDITOR`, or `llamastash config bindings` to print every effective keybinding as YAML. The full schema reference is in [`docs/usage.md`](docs/usage.md#configuration).
+allm reads `$XDG_CONFIG_HOME/llamastash/config.yaml` on Linux (fallback `~/.config/llamastash/config.yaml`), `~/Library/Application Support/llamastash/config.yaml` on macOS, and `%APPDATA%\llamastash\config\config.yaml` on Windows. 
 
-Quick tour of the top-level keys:
-
-| Key                           | What it controls                                                                                                                                                          |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `theme`                       | Built-in palette: `macchiato` (default), `latte`, `gruvbox-dark`, `solarized-dark`, `mono`. Set to `custom` to use the `custom_theme` block. Cycle live with `t:theme`.   |
-| `custom_theme`                | User-defined palette. Inherits unspecified slots from `base:` (default macchiato). Accepts `#RRGGBB` hex or ANSI names. Once defined, `Custom` joins the `t:theme` cycle. |
-| `model_paths`                 | Extra directories to scan for `.gguf` files. Merged with `-p/--model-path` and `LLAMASTASH_MODEL_PATHS`.                                                                  |
-| `disable_default_cache_paths` | Per-bucket toggles (`huggingface`, `ollama`, `lm_studio`) for the auto-walked caches.                                                                                     |
-| `disable_scan`                | Skip filesystem scanning entirely. Same as `--no-scan` / `LLAMASTASH_NO_SCAN=1`.                                                                                          |
-| `port_range`                  | Inclusive `{start, end}` TCP range the supervisor picks from. Default `41100..=41300`.                                                                                    |
-| `backend.llamacpp.servers`     | `llama-server` build/binary variants (`[{binary, name?}]`). First = default; each is a selectable "server". `--llama-server` / `LLAMASTASH_LLAMA_SERVER` set the first.   |
-| `probe_timeout_secs`          | Health-probe deadline per launch. Default `120`. Bump for 70B+ on slow disks.                                                                                             |
-| `keybindings`                 | Action-name → key-spec overrides. Kdash-style dialect (`ctrl+q`, `shift+tab`, `f1`, …).                                                                                   |
+A fully-annotated example may be found at [`config.example.yaml`](config.example.yaml). The full schema reference is in [`docs/usage.md`](docs/usage.md#configuration).
 
 ### Default scan paths
 
-When `model_paths` and `--model-path` are empty, allm searches these automatically.
+When `model_paths` are empty, allm searches these automatically.
 
 | Service      | Linux                                             | macOS                                                    |
 | ----------- | ------------------------------------------------- | -------------------------------------------------------- |
