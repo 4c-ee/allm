@@ -1,5 +1,5 @@
 use anyhow::Result;
-use llamastash::{
+use allm::{
   config::loader,
   daemon,
   launch::binary::{locate as locate_binary, LocateInputs},

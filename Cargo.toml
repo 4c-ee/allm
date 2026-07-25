@@ -296,16 +296,6 @@ version = "0.5"
 default-features = false
 features = ["html_reports"]
 
-# Bench harness for R160 latency validation. `harness = false` is
-# criterion's idiom: we hand-roll `main` in the bench file so
-# criterion's macros own the driver rather than libtest. See
-# `docs/runbooks/proxy-latency-bench.md` for the reproducible run
-# procedure.
-[[bench]]
-name = "proxy_overhead"
-harness = false
-required-features = ["test-fixtures"]
-
 [features]
 test-fixtures = []
 # Maintainer-only "user acceptance test" subcommand. Gates the

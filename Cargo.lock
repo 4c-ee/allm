@@ -18,6 +18,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "allm"
+version = "0.0.6"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "base64",
+ "blake3",
+ "clap",
+ "cliclack",
+ "console",
+ "criterion",
+ "crossterm",
+ "directories",
+ "flate2",
+ "futures",
+ "hf-hub",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ignore",
+ "libc",
+ "log",
+ "notify-debouncer-mini",
+ "rand",
+ "ratatui",
+ "regex",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "simplelog",
+ "strum 0.28.0",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "unicode-width",
+ "which",
+ "windows 0.61.3",
+ "windows-sys 0.61.2",
+ "yaml_serde",
+ "yamlpatch",
+ "yamlpath",
+ "zip",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -192,12 +241,6 @@ name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
-
-[[package]]
-name = "cargo-husky"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b02b629252fe8ef6460461409564e2c21d0c8e77e0944f3d189ff06c4e932ad"
 
 [[package]]
 name = "cast"
@@ -1496,56 +1539,6 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
-
-[[package]]
-name = "llamastash"
-version = "0.0.6"
-dependencies = [
- "anyhow",
- "arboard",
- "base64",
- "blake3",
- "cargo-husky",
- "clap",
- "cliclack",
- "console",
- "criterion",
- "crossterm",
- "directories",
- "flate2",
- "futures",
- "hf-hub",
- "http-body-util",
- "hyper",
- "hyper-util",
- "ignore",
- "libc",
- "log",
- "notify-debouncer-mini",
- "rand",
- "ratatui",
- "regex",
- "reqwest",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "simplelog",
- "strum 0.28.0",
- "sysinfo",
- "tar",
- "tempfile",
- "thiserror",
- "tokio",
- "unicode-width",
- "which",
- "windows 0.61.3",
- "windows-sys 0.61.2",
- "yaml_serde",
- "yamlpatch",
- "yamlpath",
- "zip",
-]
 
 [[package]]
 name = "lock_api"
