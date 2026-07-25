@@ -1,13 +1,13 @@
 [package]
-name = "llamastash"
+name = "allm"
 version = "0.0.6"
-authors = ["Deepu K Sasidharan <d4udts@gmail.com>"]
+authors = ["4c-ee <setsuiwasaki182@gmail.com"]
 description = "Zero-overhead, terminal-native local-LLM launcher"
-documentation = "https://github.com/llamastash/llamastash"
+documentation = "https://github.com/4c-ee/allm"
 categories = ["command-line-utilities"]
 keywords = ["llama-cpp", "llm", "tui", "gguf", "openai"]
-repository = "https://github.com/llamastash/llamastash"
-homepage = "https://github.com/llamastash/llamastash"
+repository = "https://github.com/4c-ee/allm"
+homepage = "https://github.com/4c-ee/allm"
 readme = "README.md"
 license = "MIT"
 edition = "2021"
@@ -17,7 +17,7 @@ rust-version = "1.95"
 # for tests under the `test-fixtures` feature, but cargo's run-target
 # picker checks the manifest before feature resolution, so we still need
 # this hint.
-default-run = "llamastash"
+default-run = "allm"
 exclude = [
     # Development / packaging scaffolding — never needed by `cargo install`
     # users. The published crate must fit under crates.io's 10 MiB hard
@@ -265,11 +265,11 @@ windows = { version = "0.61", features = [
 ] }
 
 [lib]
-name = "llamastash"
+name = "allm"
 path = "src/lib.rs"
 
 [[bin]]
-name = "llamastash"
+name = "allm"
 path = "src/main.rs"
 bench = false
 
@@ -283,38 +283,6 @@ required-features = ["test-fixtures"]
 bench = false
 test = false
 doc = false
-
-# Test-only fake `lemond` umbrella (OpenAI-compatible) under the same
-# feature flag. Integration tests spawn it via `CARGO_BIN_EXE_fake_lemond`.
-[[bin]]
-name = "fake_lemond"
-path = "tests/fixtures/fake_lemond.rs"
-required-features = ["test-fixtures"]
-bench = false
-test = false
-doc = false
-
-# Fake `ds4-server` for the ds4 backend integration tests — mirrors the real
-# load-before-listen + fixed-alias + no-/health contract. Spawned via
-# `CARGO_BIN_EXE_fake_ds4_server`; injected as `ds4.binary` per-test.
-[[bin]]
-name = "fake_ds4_server"
-path = "tests/fixtures/fake_ds4_server.rs"
-required-features = ["test-fixtures"]
-bench = false
-test = false
-doc = false
-
-# Local-only git hooks installed at first `cargo test` (or any
-# build that resolves dev-dependencies). The hook bodies live in
-# `.cargo-husky/hooks/`; pre-commit reformats + lints and pre-push
-# additionally runs the full test suite so wedged commits never
-# leave the laptop. `user-hooks` makes cargo-husky install our
-# scripts verbatim instead of its built-in defaults.
-[dev-dependencies.cargo-husky]
-version = "1"
-default-features = false
-features = ["user-hooks"]
 
 # Criterion drives the proxy-overhead bench landed by Unit 7 of the
 # proxy-router plan. Default features pull in `rayon` + `plotters`
