@@ -7,7 +7,7 @@ A lean TUI for launching local LLMs with llama-cpp.
 ## AI Usage
 allm was developed almost entirely by LLMs; DeepSeek v4 Flash and MiniMax m3 and m2.5 via [opencode](https://github.com/anomalyco/opencode). 
 
-I (4c-ee) did not make this; they did. I'm just a product manager. The ideas ~~guy~~girl.
+I (4c-ee) did not make this; they did. I'm just a product manager. The ideas ~~guy~~ girl.
 I did the branding, the publicity, etc. But they're the programmers.
 
 
